@@ -1,0 +1,19 @@
+manifest:
+  version: "0.13"
+
+  # This manifest repo uses the Zephyr workspace already initialized at
+  # ZEPHYR_BASE (C:/Users/jaiva/zephyrproject/zephyr).
+  # Run: west build -b nucleo_u575zi_q app
+  # from within the zephyrproject workspace, pointing to this app directory.
+  #
+  # Alternatively set ZEPHYR_BASE and build standalone:
+  #   cd app && west build -b nucleo_u575zi_q .
+
+  self:
+    path: digital-stethoscope
+
+  projects:
+    - name: zephyr
+      url: https://github.com/zephyrproject-rtos/zephyr
+      revision: v4.4.0-rc1
+      import: true

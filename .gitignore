@@ -1,0 +1,26 @@
+# Zephyr build directories
+build_stm32/
+build_ble/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+ml/data/raw/
+ml/data/processed/
+*.egg-info/
+
+# Large training artifacts — model_data.cc + .tflite files are checked in
+ml/models/*.h5
+ml/models/keras_best.keras
+ml/models/resnet10_savedmodel/
+ml/models/checkpoints/
+ml/models/quantize_log.txt
+ml/models/train_log.txt
+
+# Editor / OS
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+.claude/
