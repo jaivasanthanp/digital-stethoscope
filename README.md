@@ -9,8 +9,7 @@ computes mel-spectrograms on-device, runs a quantized ResNet-10 INT8 CNN to clas
 transmits results over BLE to a phone.
 
 Built as a final project for the ML course at USST Shanghai (Messtechnik und Sensorik
-exchange, Hochschule Coburg) and as a portfolio piece targeting German medtech embedded
-internships (Dräger, Getemed, Solectrix).
+exchange, Hochschule Coburg)
 
 ---
 
