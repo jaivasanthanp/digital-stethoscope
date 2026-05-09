@@ -30,7 +30,7 @@ void inference_init(void);
  * n_elements   : must be 64*64 = 4096
  * confidence   : output — confidence of winning class, 0–100
  *
- * Returns: class_id (0=Normal, 1=SysMurmur, 2=DiaMurmur, 3=S3Gallop)
+ * Returns: class_id (0=Absent, 1=Present, 2=Unknown)
  *          -1 on error
  */
 int inference_run(const float *spec_in, size_t n_elements, uint8_t *confidence);

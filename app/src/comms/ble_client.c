@@ -6,7 +6,7 @@
  * on the Heart Sound Classification characteristic.
  *
  * Packet format (6 bytes, little-endian):
- *   [0]   class_id     uint8   (0=Normal 1=SysMurmur 2=DiaMurmur 3=S3Gallop)
+ *   [0]   class_id     uint8   (0=Absent 1=Present 2=Unknown)
  *   [1]   confidence   uint8   (0–100)
  *   [2]   reserved     uint8   (0x00)
  *   [3]   ts_low       uint8   (timestamp_ms bits 0–7)
@@ -19,6 +19,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
 
 LOG_MODULE_REGISTER(ble_client, LOG_LEVEL_INF);
 
@@ -49,8 +50,8 @@ void ble_client_send(uint8_t class_id, uint8_t confidence, uint32_t timestamp_ms
 
     if (uart_dev == NULL) {
         /* No UART — just log the result (useful during early dev) */
-        static const char *names[] = {"Normal", "SysMurmur", "DiaMurmur", "S3Gallop"};
-        const char *name = (class_id < 4) ? names[class_id] : "Unknown";
+        static const char *names[] = {"Absent", "Present", "Unknown"};
+        const char *name = (class_id < ARRAY_SIZE(names)) ? names[class_id] : "Invalid";
         LOG_INF("BLE stub: class=%s conf=%u%% ts=%ums", name, confidence, timestamp_ms);
         return;
     }

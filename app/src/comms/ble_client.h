@@ -12,7 +12,7 @@ void ble_client_init(void);
 /*
  * Send a 6-byte heart sound classification result packet to nRF52840.
  * Packet format (little-endian):
- *   [0]   class_id     : uint8  (0=Normal 1=SysMurmur 2=DiaMurmur 3=S3Gallop 0xFF=NoResult)
+ *   [0]   class_id     : uint8  (0=Absent 1=Present 2=Unknown 0xFF=NoResult)
  *   [1]   confidence   : uint8  (0–100)
  *   [2]   reserved     : uint8  (0x00)
  *   [3–5] timestamp_ms : uint24 little-endian (low 24 bits of uptime)

@@ -5,7 +5,7 @@
 
 A wearable digital stethoscope prototype that currently feeds synthetic PCG strings
 into the STM32U575, computes mel-spectrograms on-device, runs a quantized ResNet-10
-INT8 CNN to classify **Normal / Systolic Murmur / Diastolic Murmur / S3 Gallop**
+INT8 CNN to classify **Absent / Present / Unknown murmur status**
 in real time, and transmits results over BLE to a phone.
 
 Current hardware note: the ICS-43434 microphone is discontinued for this revision.
@@ -49,7 +49,7 @@ STM32U575  --  Zephyr RTOS (4 threads, message queues)
     +-- InferenceThread (prio 6)
     |       TFLite Micro -- ResNet-10 INT8
     |       CMSIS-NN kernels (Cortex-M33 DSP MACs)
-    |       Output: class_id (0-3) + confidence (0-100%)
+    |       Output: class_id (0-2) + confidence (0-100%)
     |
     +-- CommThread (prio 8)
             6-byte UART packet -> nRF52840
@@ -65,6 +65,34 @@ STM32U575  --  Zephyr RTOS (4 threads, message queues)
 
 ## ML Pipeline
 
+### Current Status (2026-05-09)
+
+- Dataset migration from the older PhysioNet 2016 heuristic labels to the CirCor / PhysioNet 2022 DigiScope dataset is complete for the deployed model.
+- Current deployed target classes are `Absent`, `Present`, and `Unknown` from the official CirCor `Murmur` label.
+- CirCor raw data has been downloaded locally under `ml/data_circor/` and is ignored by git.
+- Preprocessing completed successfully with patient-wise splitting and 64x64 log-mel spectrogram generation.
+- Generated split counts:
+
+| Split | Absent | Present | Unknown | Total |
+|-------|--------|---------|---------|-------|
+| Train | 6662 | 1723 | 431 | 8816 |
+| Val | 1406 | 343 | 104 | 1853 |
+| Test | 1469 | 390 | 88 | 1947 |
+
+- Normalization parameters from the CirCor training split: mean `-3.0214`, std `1.5694`.
+- Python dataloader sanity check passes on the new dataset.
+- Firmware, dashboard, export, and validation labels have been updated to the deployed three-class mapping.
+- Keras ResNet-10 retraining and INT8 post-training quantization completed on CPU.
+- Current deployed model results: float32 test accuracy `81.2%`, INT8 test accuracy `81.5%`, quantization delta `-0.36%`, INT8 model size `104688` bytes (`102.2 KB`).
+- Held-out per-class recall: `Absent 95%`, `Present 41%`, `Unknown 19%`; balanced accuracy is `52.0%`. Overall accuracy improved, but minority-class recall still needs more work before clinical use.
+- Export completed into STM32 source: `app/src/ml/model_data.cc`, `app/src/dsp/normalization_params.h`, and `app/src/ml/test_vectors.h`.
+- STM32U575 synthetic firmware build completed successfully in `build_stm32_synth/`.
+- Firmware build size with the CirCor model and validation vectors: FLASH `561632 B / 2 MB` (`26.78%`), RAM `337100 B / 768 KB` (`42.86%`).
+- Flash to STM32U575 completed successfully through ST-LINK/OpenOCD (`build_stm32_synth/zephyr/zephyr.hex`, `561632` bytes written).
+- On-device validation over `COM6` passed: STM32U575 matched the Python TFLite reference on `9/9` vectors (`100.0%` reference match).
+- Current true-label score on the small generated validation-vector subset is `4/9` (`44.4%`), so deployment is correct, but minority-class classifier quality still needs improvement before it is a strong diagnostic model.
+- Next engineering steps: improve Present/Unknown recall with threshold tuning, sampling strategy, stronger augmentation, and possibly a binary `Absent` vs `Present/Unknown` safety gate.
+
 ### Model: ResNet-10 with SE blocks
 
 ```
@@ -77,15 +105,15 @@ ResBlock1:  (16, 16, 16)  3x3 x2, SE block
 ResBlock2:  (32,  8,  8)  3x3 x2, SE block, stride-2 downsample
 ResBlock3:  (64,  4,  4)  3x3 x2, SE block, stride-2 downsample
 
-GlobalAvgPool -> FC -> Softmax(4)
+GlobalAvgPool -> FC -> Softmax(3)
 
 Parameters: ~81K float32  ->  ~30K INT8 after quantization
 ```
 
 ### Training
 
-- **Dataset:** PhysioNet 2016 Challenge (3,126 PCG recordings, 2,531 unique after preprocessing)
-- **Classes:** Normal (1673) / Systolic Murmur (430) / Diastolic Murmur (242) / S3 Gallop (186)
+- **Dataset:** CirCor / PhysioNet 2022 DigiScope murmur dataset, patient-wise split
+- **Classes:** Absent / Present / Unknown
 - **Preprocessing:** resample to 4 kHz, HPF, 2-sec Hann-windowed mel-spectrogram (n_fft=512, hop=128, n_mels=64, f_min=25 Hz, f_max=2 kHz)
 - **Augmentation:** TimeShift ±200ms, SpecAugment, Gaussian noise (SNR 20–35 dB)
 - **Training:** Keras, Adam, cosine LR decay, class-weighted cross-entropy, 50 epochs
@@ -96,15 +124,14 @@ INT8 post-training quantization via TFLite converter with 200-clip representativ
 
 | Metric | Value |
 |--------|-------|
-| Float32 accuracy | 63.4% |
-| INT8 accuracy | 63.2% |
-| Accuracy drop | **0.26%** (target < 2%) |
-| Model size | 334 KB float32 → **110 KB INT8** (3× reduction) |
+| Float32 accuracy | 81.2% |
+| INT8 accuracy | 81.5% |
+| Accuracy drop | **-0.36%** (INT8 slightly higher on test split) |
+| Model size | ~313 KB float32 -> **102.2 KB INT8** |
 
-> **Note on accuracy:** PhysioNet 2016 provides only binary labels (normal/abnormal).
-> Sub-class labels (systolic/diastolic/S3) are assigned heuristically from prevalence
-> statistics. The Normal class achieves F1=0.88. True 4-class accuracy requires
-> PhysioNet/CinC 2022 (murmur-type annotations).
+> **Note on accuracy:** the deployed CirCor model uses the official patient-level
+> murmur labels. Overall accuracy is now stronger, but Present/Unknown recall is
+> still the limiting metric for diagnostic usefulness.
 
 ---
 
@@ -116,9 +143,9 @@ All numbers measured on the physical NUCLEO-U575ZI-Q board via UART.
 |--------|--------|----------|
 | Inference latency | < 150 ms | **102 ms** |
 | Tensor arena used | ~95 KB est. | **29.3 KB** (28% of allocation) |
-| FLASH usage | < 2 MB | **430 KB (21%)** without test vectors |
+| FLASH usage | < 2 MB | **561632 B (26.78%)** with validation vectors |
 | RAM usage | < 768 KB | **338 KB (44%)** |
-| On-device vs Python TFLite | > 95% match | **12/12 = 100%** |
+| On-device vs Python TFLite | > 95% match | **9/9 = 100%** |
 
 ### Boot log (captured from UART on COM6 @ 115200 baud)
 
@@ -130,12 +157,12 @@ All numbers measured on the physical NUCLEO-U575ZI-Q board via UART.
 [00:00:00.004] <inf> mel_spec: mel_spec: init OK (FFT=512, mels=64, frames=62)
 [00:00:00.004] <inf> main: InferenceThread started
 [00:00:00.000] <inf> inference: TFLite Micro initialized
-[00:00:00.000] <inf> inference:   Model: 104752 bytes
+[00:00:00.000] <inf> inference:   Model: 104688 bytes
 [00:00:00.000] <inf> inference:   Arena used: 29332 / 40960 bytes
 [00:00:00.000] <inf> inference:   Input:  [1, 64, 64, 1]  type=9 (INT8)
-[00:00:00.000] <inf> inference:   Output: [1, 4]  type=9 (INT8)
-[00:00:02.191] <inf> main: Class: Normal        Confidence:  30%  Latency: 102ms
-[00:00:04.191] <inf> main: Class: SysMurmur     Confidence:  29%  Latency: 102ms
+[00:00:00.000] <inf> inference:   Output: [1, 3]  type=9 (INT8)
+[00:00:02.191] <inf> main: Class: Absent        Confidence:  91%  Latency: 102ms
+[00:00:04.191] <inf> main: Class: Present       Confidence:  41%  Latency: 102ms
 ```
 
 ### On-device validation (`ml/05_validate_on_device.py`)
@@ -143,14 +170,14 @@ All numbers measured on the physical NUCLEO-U575ZI-Q board via UART.
 ```
   #  True             Reference            Device               Match
 ------------------------------------------------------------------------
-  0  Normal           Normal        (31%)  Normal        (31%)  OK
-  1  Normal           Normal        (32%)  Normal        (32%)  OK
-  2  Normal           Normal        (30%)  Normal        (30%)  OK
-  3  SystolicMurmur   SystolicMurmur(27%)  SystolicMurmur(27%)  OK
+  0  Absent           Absent        (91%)  Absent        (91%)  OK
+  1  Absent           Absent        (94%)  Absent        (94%)  OK
+  2  Absent           Absent        (95%)  Absent        (94%)  OK
+  3  Present          Absent        (80%)  Absent        (80%)  OK
   ...
- 11  S3Gallop         Normal        (29%)  Normal        (29%)  OK
+  8  Unknown          Absent        (50%)  Absent        (52%)  OK
 ------------------------------------------------------------------------
-On-device vs Python reference: 12/12 = 100%
+On-device vs Python reference: 9/9 = 100%
 ```
 
 ---
@@ -176,8 +203,8 @@ digital-stethoscope/
 |       |   `-- normalization_params.h    <- training set mean/std
 |       |-- ml/
 |       |   |-- inference.cc         <- TFLite Micro interpreter (C++)
-|       |   |-- model_data.cc        <- ResNet-10 INT8 as C array (110 KB)
-|       |   |-- test_vectors.h       <- 12 normalized spectrograms for validation
+|       |   |-- model_data.cc        <- ResNet-10 INT8 as C array (102 KB)
+|       |   |-- test_vectors.h       <- 9 normalized spectrograms for validation
 |       |   `-- validate.c           <- UART test harness (05_validate_on_device.py)
 |       `-- comms/
 |           `-- ble_client.c         <- 6-byte UART packet to nRF52840
@@ -196,11 +223,11 @@ digital-stethoscope/
     |-- 03_quantize.py               <- Keras ResNet-10 + TFLite INT8 PTQ
     |-- 04_export.py                 <- .tflite -> C arrays + normalization header
     |-- 05_validate_on_device.py     <- Send test vectors over UART, verify results
-    |-- visualize_spectrograms.py    <- Plot 4-class spectrogram grid
+    |-- visualize_spectrograms.py    <- Plot 3-class spectrogram grid
     `-- models/
         |-- resnet10.py              <- PyTorch ResNet-10 definition
-        |-- dataset.py               <- PhysioNet 2016 dataloader
-        |-- resnet10_int8.tflite     <- Quantized model (110 KB)
+        |-- dataset.py               <- CirCor dataloader
+        |-- resnet10_int8.tflite     <- Quantized model (102 KB)
         |-- confusion_matrix.png
         |-- training_curves.png
         `-- spectrogram_samples.png
@@ -250,7 +277,7 @@ west flash --build-dir build_ble   # when board arrives
 ```bash
 pip install -r ml/requirements.txt
 
-python ml/01_preprocess.py          # download PhysioNet 2016 + generate spectrograms
+python ml/01_preprocess.py          # download CirCor / PhysioNet 2022 + generate spectrograms
 python ml/02_train.py               # train ResNet-10 (PyTorch)
 python ml/03_quantize.py            # Keras retrain + INT8 PTQ
 python ml/04_export.py              # export C arrays to app/src/ml/
@@ -267,7 +294,7 @@ python ml/05_validate_on_device.py --port COM6   # on-device validation
 
 | Byte | Field | Description |
 |------|-------|-------------|
-| 0 | `class_id` | 0=Normal, 1=SystolicMurmur, 2=DiastolicMurmur, 3=S3Gallop, 0xFF=Error |
+| 0 | `class_id` | 0=Absent, 1=Present, 2=Unknown, 0xFF=Error |
 | 1 | `confidence` | 0–100 (%) |
 | 2 | reserved | 0x00 |
 | 3–5 | `timestamp_ms` | uptime milliseconds, little-endian |
@@ -300,7 +327,7 @@ Connect with **nRF Connect** (iOS/Android), subscribe to notifications, observe 
 
 **Mel-spectrogram over raw audio:** 75% of diagnostically relevant cardiac energy lives below 600 Hz. Linear FFT wastes 70% of bins on noise. Mel scale concentrates resolution in the cardiac band. Log power compression equalizes S1 amplitude vs murmur amplitude.
 
-**INT8 quantization:** 3× model size reduction (334 KB → 110 KB), ~4× inference speedup via CMSIS-NN integer MACs, 0.26% accuracy cost.
+**INT8 quantization:** model size reduction to 102.2 KB, ~4× inference speedup via CMSIS-NN integer MACs, and no observed accuracy loss on the current test split.
 
 ---
 
@@ -312,7 +339,7 @@ IEC 62304 Class B SaMD — advisory output, not autonomous diagnosis. ISO 14971 
 
 ## References
 
-- [PhysioNet 2016 Challenge](https://physionet.org/content/challenge-2016/1.0.0/) — PCG dataset
+- [CirCor DigiScope Phonocardiogram Dataset](https://physionet.org/content/circor-heart-sound/1.0.3/) — current PCG murmur dataset
 - [Zephyr I2S API](https://docs.zephyrproject.org/latest/hardware/peripherals/i2s.html)
 - [TFLite Micro Zephyr sample](https://github.com/zephyrproject-rtos/zephyr/tree/main/samples/modules/tflite-micro)
 - [CMSIS-DSP FFT](https://arm-software.github.io/CMSIS-DSP/latest/group__RealFFT.html)

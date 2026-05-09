@@ -16,8 +16,8 @@ import matplotlib.gridspec as gridspec
 from pathlib import Path
 import random
 
-CLASS_NAMES = ["normal", "systolic", "diastolic", "s3gallop"]
-CLASS_LABELS = ["Normal", "Systolic Murmur", "Diastolic Murmur", "S3 Gallop"]
+CLASS_NAMES = ["absent", "present", "unknown"]
+CLASS_LABELS = ["Absent", "Present", "Unknown"]
 
 
 def load_random_sample(class_dir: Path) -> np.ndarray | None:
@@ -34,7 +34,7 @@ def plot_spectrograms(data_root: Path, split: str = "train", save: bool = False)
                  f"64 mel bins × 64 time frames  |  4 kHz SR, n_fft=512, hop=128",
                  fontsize=12)
 
-    gs = gridspec.GridSpec(2, 2, hspace=0.45, wspace=0.3)
+    gs = gridspec.GridSpec(1, 3, hspace=0.45, wspace=0.3)
 
     split_dir = data_root / "processed" / split
     found = 0
@@ -46,7 +46,7 @@ def plot_spectrograms(data_root: Path, split: str = "train", save: bool = False)
             print(f"  No samples found for class: {class_name}")
             continue
 
-        ax = fig.add_subplot(gs[i // 2, i % 2])
+        ax = fig.add_subplot(gs[0, i])
         im = ax.imshow(spec, aspect='auto', origin='lower',
                        cmap='inferno', interpolation='nearest')
         ax.set_title(f"Class {i}: {class_label}", fontsize=10, fontweight='bold')
@@ -81,7 +81,7 @@ def plot_class_statistics(data_root: Path):
     print(f"{'Class':<15} {'train':>8} {'val':>8} {'test':>8} {'total':>8}")
     print("-" * 45)
 
-    totals = [0, 0, 0, 0]
+    totals = [0, 0, 0]
     for class_name, class_label in zip(CLASS_NAMES, CLASS_LABELS):
         counts = []
         for split in ["train", "val", "test"]:
@@ -105,7 +105,7 @@ def plot_class_statistics(data_root: Path):
 
 def main():
     parser = argparse.ArgumentParser(description="Visualize mel spectrograms")
-    parser.add_argument("--data-dir", default="ml/data")
+    parser.add_argument("--data-dir", default="ml/data_circor")
     parser.add_argument("--split",    default="train",
                         choices=["train", "val", "test"])
     parser.add_argument("--save",     action="store_true",

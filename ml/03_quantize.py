@@ -27,8 +27,8 @@ print(f"TensorFlow: {tf.__version__}")
 
 
 # ── Constants ─────────────────────────────────────────────────────────────────
-CLASS_NAMES = ["normal", "systolic", "diastolic", "s3gallop"]
-N_CLASSES   = 4
+CLASS_NAMES = ["absent", "present", "unknown"]
+N_CLASSES   = len(CLASS_NAMES)
 IMG_SIZE    = 64
 
 
@@ -141,9 +141,14 @@ def make_dataset(paths, labels, norm_mean, norm_std,
     return ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
 
 
-def class_weights_from_labels(labels):
+def class_weights_from_labels(labels, mode: str = "inverse"):
     counts  = np.bincount(labels, minlength=N_CLASSES).astype(np.float32)
-    weights = 1.0 / (counts + 1e-6)
+    if mode == "none":
+        return None
+    if mode == "sqrt":
+        weights = 1.0 / np.sqrt(counts + 1e-6)
+    else:
+        weights = 1.0 / (counts + 1e-6)
     weights = weights / weights.sum() * N_CLASSES
     return {i: float(w) for i, w in enumerate(weights)}
 
@@ -193,11 +198,13 @@ def eval_tflite(model_bytes, test_specs, test_labels):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data-dir",    default="ml/data")
+    parser.add_argument("--data-dir",    default="ml/data_circor")
     parser.add_argument("--epochs",      type=int,   default=50)
     parser.add_argument("--batch-size",  type=int,   default=32)
     parser.add_argument("--lr",          type=float, default=1e-3)
     parser.add_argument("--calib-clips", type=int,   default=200)
+    parser.add_argument("--class-weight-mode", choices=["inverse", "sqrt", "none"],
+                        default="inverse")
     parser.add_argument("--no-se",       action="store_true")
     parser.add_argument("--skip-train",  action="store_true",
                         help="Skip training, load existing SavedModel")
@@ -257,7 +264,7 @@ def main():
             vc = sum(1 for l in val_lbls   if l == i)
             print(f"    {name}: train={tc}, val={vc}")
 
-        class_weights = class_weights_from_labels(np.array(train_lbls))
+        class_weights = class_weights_from_labels(np.array(train_lbls), args.class_weight_mode)
         print(f"  Class weights: {class_weights}")
 
         train_ds = make_dataset(train_paths, train_lbls, norm_mean, norm_std,

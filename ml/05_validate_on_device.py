@@ -39,7 +39,7 @@ except ImportError:
 from pathlib import Path
 
 
-CLASS_NAMES = ["Normal", "SystolicMurmur", "DiastolicMurmur", "S3Gallop"]
+CLASS_NAMES = ["Absent", "Present", "Unknown"]
 RESPONSE_MAGIC = 0xA5
 
 
@@ -97,8 +97,8 @@ def recv_response(ser: serial.Serial, timeout: float = 3.0) -> tuple[int, int] |
 def load_test_vectors(data_root: Path, n_per_class: int,
                       norm_mean: float, norm_std: float):
     """Load and normalise test spectrograms — same order as test_vectors.h."""
-    class_dirs  = ["normal", "systolic", "diastolic", "s3gallop"]
-    class_labels = [0, 1, 2, 3]
+    class_dirs  = ["absent", "present", "unknown"]
+    class_labels = [0, 1, 2]
     vectors = []
 
     test_dir = data_root / "test"
@@ -190,7 +190,7 @@ def validate_on_device(port: str, baud: int,
 
             print(f"{i:>3}  {CLASS_NAMES[true_label]:<16} "
                   f"{CLASS_NAMES[ref_class]:<14}({ref_conf*100:.0f}%)  "
-                  f"{CLASS_NAMES[dev_class] if dev_class < 4 else 'INVALID':<14}"
+                  f"{CLASS_NAMES[dev_class] if dev_class < len(CLASS_NAMES) else 'INVALID':<14}"
                   f"({dev_conf}%)  {vs_ref}")
 
     finally:
@@ -218,8 +218,8 @@ def main():
     parser.add_argument("--port",         default="COM6",
                         help="Serial port  (e.g. COM6 or /dev/ttyACM0)")
     parser.add_argument("--baud",         type=int, default=115200)
-    parser.add_argument("--data-dir",     default="ml/data",
-                        help="Root of ml/data directory")
+    parser.add_argument("--data-dir",     default="ml/data_circor",
+                        help="Root of processed data directory")
     parser.add_argument("--model",        default="ml/models/resnet10_int8.tflite",
                         help="Path to INT8 .tflite model")
     parser.add_argument("--n-per-class",  type=int, default=3,

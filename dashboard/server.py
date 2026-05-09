@@ -37,7 +37,7 @@ CLASS_RE = re.compile(
 INPUT_RE = re.compile(r"Synthetic input string:\s+(?P<input>[A-Za-z0-9_]+)")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-CLASS_NAMES = ["Normal", "SysMurmur", "DiaMurmur", "S3Gallop"]
+CLASS_NAMES = ["Absent", "Present", "Unknown"]
 
 
 def clean_uart_line(raw: bytes) -> str:
@@ -200,20 +200,23 @@ HTML = r"""<!doctype html>
   <title>STM32 ML Inference Dashboard</title>
   <style>
     :root {
-      --bg: #f6f7f9;
+      --bg: #f8f9fa;
       --panel: #ffffff;
-      --ink: #1f2933;
-      --muted: #667085;
-      --line: #d7dde5;
-      --accent: #1677ff;
-      --ok: #14804a;
-      --warn: #b54708;
-      --bad: #b42318;
+      --ink: #202122;
+      --muted: #54595d;
+      --line: #a2a9b1;
+      --rule: #c8ccd1;
+      --header: #eaecf0;
+      --accent: #0645ad;
+      --accent-2: #3366cc;
+      --ok: #14866d;
+      --warn: #ac6600;
+      --bad: #b32424;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif;
+      font-family: Georgia, "Times New Roman", serif;
       color: var(--ink);
       background: var(--bg);
     }
@@ -222,66 +225,105 @@ HTML = r"""<!doctype html>
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      padding: 18px 24px;
+      padding: 14px 22px;
       border-bottom: 1px solid var(--line);
       background: var(--panel);
     }
-    h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: 0; }
-    .sub { color: var(--muted); font-size: 13px; margin-top: 3px; }
+    h1 {
+      margin: 0;
+      font-family: Georgia, "Linux Libertine", "Times New Roman", serif;
+      font-size: 24px;
+      font-weight: 400;
+      letter-spacing: 0;
+      border-bottom: 1px solid var(--rule);
+    }
+    .sub { color: var(--muted); font-size: 13px; margin-top: 5px; font-family: Arial, sans-serif; }
     .actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     button {
-      height: 38px;
-      padding: 0 14px;
-      border: 1px solid var(--line);
-      border-radius: 6px;
-      background: var(--panel);
+      height: 32px;
+      padding: 0 12px;
+      border: 1px solid #72777d;
+      border-radius: 2px;
+      background: linear-gradient(#ffffff, #f8f9fa);
       color: var(--ink);
-      font-weight: 650;
+      font-family: Arial, sans-serif;
+      font-size: 13px;
+      font-weight: 600;
       cursor: pointer;
     }
-    button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+    button.primary { background: linear-gradient(#f8fbff, #eaf3ff); border-color: var(--accent-2); color: var(--accent); }
     button:disabled { opacity: 0.55; cursor: not-allowed; }
+    button.icon {
+      width: 36px;
+      padding: 0;
+      display: inline-grid;
+      place-items: center;
+    }
+    button.icon svg {
+      width: 19px;
+      height: 19px;
+      stroke: currentColor;
+      stroke-width: 2;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
     main {
       display: grid;
       grid-template-columns: 1.1fr 0.9fr;
-      gap: 16px;
-      padding: 16px;
-      max-width: 1320px;
+      gap: 12px;
+      padding: 14px;
+      max-width: 1360px;
       margin: 0 auto;
     }
     section {
       background: var(--panel);
       border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 16px;
+      border-radius: 0;
+      padding: 12px;
       min-width: 0;
     }
     .span { grid-column: 1 / -1; }
     .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
     .metric {
       border: 1px solid var(--line);
-      border-radius: 8px;
-      padding: 14px;
-      min-height: 86px;
+      border-radius: 0;
+      padding: 10px;
+      min-height: 78px;
+      background: #f8f9fa;
     }
-    .label { color: var(--muted); font-size: 12px; font-weight: 650; text-transform: uppercase; }
-    .value { margin-top: 8px; font-size: 24px; font-weight: 760; overflow-wrap: anywhere; }
-    .status { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; }
-    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); }
+    .label {
+      color: var(--ink);
+      font-family: Arial, sans-serif;
+      font-size: 12px;
+      font-weight: 700;
+      text-transform: uppercase;
+      background: var(--header);
+      border-bottom: 1px solid var(--rule);
+      padding: 4px 6px;
+      margin-bottom: 8px;
+    }
+    .metric .label {
+      margin: -10px -10px 8px;
+    }
+    .value { margin-top: 6px; font-family: Arial, sans-serif; font-size: 23px; font-weight: 700; overflow-wrap: anywhere; }
+    .status { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font: 13px Arial, sans-serif; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--bad); border: 1px solid #72777d; }
     .dot.on { background: var(--ok); }
     .bars { display: grid; gap: 11px; margin-top: 10px; }
     .bar-row { display: grid; grid-template-columns: 112px 1fr 42px; align-items: center; gap: 10px; font-size: 13px; }
-    .track { height: 16px; background: #edf1f5; border-radius: 4px; overflow: hidden; }
+    .track { height: 14px; background: #eaecf0; border: 1px solid var(--line); border-radius: 0; overflow: hidden; }
     .fill { height: 100%; width: 0%; background: var(--accent); transition: width 180ms ease; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { padding: 9px 8px; border-bottom: 1px solid var(--line); text-align: left; }
-    th { color: var(--muted); font-size: 12px; font-weight: 700; }
+    th, td { padding: 7px 8px; border: 1px solid var(--rule); text-align: left; font-family: Arial, sans-serif; }
+    th { color: var(--ink); font-size: 12px; font-weight: 700; background: var(--header); }
     .log {
       height: 290px;
       overflow: auto;
-      background: #111827;
-      color: #e5e7eb;
-      border-radius: 6px;
+      background: #f8f9fa;
+      color: #202122;
+      border: 1px solid var(--line);
+      border-radius: 0;
       padding: 10px;
       font-family: Consolas, ui-monospace, monospace;
       font-size: 12px;
@@ -293,13 +335,25 @@ HTML = r"""<!doctype html>
       gap: 16px;
       align-items: stretch;
     }
+    .script-box {
+      margin-top: 12px;
+      padding: 10px;
+      min-height: 44px;
+      border: 1px solid var(--line);
+      border-radius: 0;
+      background: #f8f9fa;
+      font-family: Consolas, ui-monospace, monospace;
+      font-size: 12px;
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
     canvas {
       display: block;
       width: 100%;
       height: 240px;
       border: 1px solid var(--line);
-      border-radius: 6px;
-      background: #fbfcfe;
+      border-radius: 0;
+      background: #ffffff;
     }
     .panel-head {
       display: flex;
@@ -308,7 +362,7 @@ HTML = r"""<!doctype html>
       gap: 12px;
       margin-bottom: 10px;
     }
-    .small { color: var(--muted); font-size: 12px; margin-top: 8px; }
+    .small { color: var(--muted); font: 12px Arial, sans-serif; margin-top: 8px; }
     @media (max-width: 920px) {
       header { align-items: flex-start; flex-direction: column; }
       main { grid-template-columns: 1fr; }
@@ -340,17 +394,18 @@ HTML = r"""<!doctype html>
       <div>
         <div class="panel-head">
           <div class="label">DSP Input Waveform</div>
-          <button id="playAudio">Play Heartbeat</button>
+          <button id="audioToggle" class="icon" aria-label="Unmute continuous audio" title="Unmute continuous audio"></button>
         </div>
         <canvas id="waveform" width="900" height="260"></canvas>
         <div class="small">Synthetic 2-second PCM window rendered at 4 kHz before the STM32 DSP stage.</div>
+        <div id="scriptText" class="script-box">NORMAL|0.05,0.10,100,0.40;0.45,0.08,120,0.24;1.05,0.10,100,0.40;1.45,0.08,120,0.24</div>
       </div>
       <div>
         <div class="panel-head">
           <div class="label">ML Input Transform</div>
         </div>
         <canvas id="spectrogram" width="900" height="260"></canvas>
-        <div class="small">Mel-style time-frequency view corresponding to the spectrogram tensor sent into TFLite Micro.</div>
+        <div class="small">64-bin log time-frequency transform computed from the same waveform the STM32 injects into DSP.</div>
       </div>
     </section>
     <section>
@@ -370,27 +425,40 @@ HTML = r"""<!doctype html>
     </section>
   </main>
   <script>
-    const state = { classes: ["Normal", "SysMurmur", "DiaMurmur", "S3Gallop"], counts: {}, history: [] };
+    const state = { classes: ["Absent", "Present", "Unknown"], counts: {}, history: [] };
     const $ = (id) => document.getElementById(id);
     const SAMPLE_RATE = 4000;
     const WINDOW_SECONDS = 2;
+    const AUDIO_LOOP_REPEATS = 4;
     let renderedInput = null;
     let latestSamples = new Float32Array(SAMPLE_RATE * WINDOW_SECONDS);
+    let latestScript = "";
+    let audioCtx = null;
+    let loopSource = null;
+    let loopGain = null;
+    let audioLoopEnabled = false;
 
     const synthScripts = {
-      NORMAL: "0.05,0.10,100,0.40;0.45,0.08,120,0.24;1.05,0.10,100,0.40;1.45,0.08,120,0.24",
-      SYSTOLIC: "0.05,0.10,100,0.32;0.14,0.30,260,0.35;0.45,0.08,120,0.20;1.05,0.10,100,0.32;1.14,0.30,260,0.35;1.45,0.08,120,0.20",
-      DIASTOLIC: "0.05,0.10,100,0.30;0.45,0.08,120,0.22;0.54,0.44,190,0.35;1.05,0.10,100,0.30;1.45,0.08,120,0.22;1.54,0.40,190,0.35",
-      S3: "0.05,0.10,100,0.34;0.45,0.08,120,0.22;0.56,0.08,45,0.35;1.05,0.10,100,0.34;1.45,0.08,120,0.22;1.56,0.08,45,0.35"
+      NORMAL: "NORMAL|0.05,0.10,100,0.40;0.45,0.08,120,0.24;1.05,0.10,100,0.40;1.45,0.08,120,0.24",
+      SYSTOLIC: "SYSTOLIC|0.05,0.10,100,0.32;0.14,0.30,260,0.35;0.45,0.08,120,0.20;1.05,0.10,100,0.32;1.14,0.30,260,0.35;1.45,0.08,120,0.20",
+      DIASTOLIC: "DIASTOLIC|0.05,0.10,100,0.30;0.45,0.08,120,0.22;0.54,0.44,190,0.35;1.05,0.10,100,0.30;1.45,0.08,120,0.22;1.54,0.40,190,0.35",
+      S3: "S3|0.05,0.10,100,0.34;0.45,0.08,120,0.22;0.56,0.08,45,0.35;1.05,0.10,100,0.34;1.45,0.08,120,0.22;1.56,0.08,45,0.35",
+      UNKNOWN: "UNKNOWN|0.07,0.05,82,0.08;0.33,0.06,310,0.05;0.79,0.04,125,0.06;1.18,0.08,515,0.04;1.66,0.05,64,0.06"
     };
 
     function post(path) {
       fetch(path, { method: "POST" }).catch(() => {});
     }
 
-    $("start").onclick = () => post("/api/start");
-    $("pause").onclick = () => post("/api/pause");
-    $("playAudio").onclick = () => playLatestAudio();
+    $("start").onclick = () => {
+      post("/api/start");
+      setAudioLoop(true);
+    };
+    $("pause").onclick = () => {
+      post("/api/pause");
+      setAudioLoop(false);
+    };
+    $("audioToggle").onclick = () => setAudioLoop(!audioLoopEnabled);
 
     function render(s) {
       Object.assign(state, s);
@@ -404,7 +472,8 @@ HTML = r"""<!doctype html>
       $("confidence").textContent = latest ? `${latest.confidence}%` : "-";
       $("latency").textContent = latest ? `${latest.latency} ms` : "-";
       $("input").textContent = latest ? latest.input : "-";
-      $("playAudio").disabled = !latest;
+      $("audioToggle").disabled = !latest;
+      updateAudioIcon();
       if (latest && latest.input !== renderedInput) {
         renderSignal(latest.input);
       }
@@ -430,7 +499,9 @@ HTML = r"""<!doctype html>
     }
 
     function parseEvents(input) {
-      const script = synthScripts[input] || synthScripts.NORMAL;
+      const fullScript = synthScripts[input] || synthScripts.NORMAL;
+      latestScript = fullScript;
+      const script = fullScript.includes("|") ? fullScript.split("|")[1] : fullScript;
       return script.split(";").map(part => {
         const [start, duration, freq, amp] = part.split(",").map(Number);
         return { start, duration, freq, amp };
@@ -463,8 +534,10 @@ HTML = r"""<!doctype html>
       const data = synthesize(input);
       latestSamples = data.samples;
       renderedInput = input;
+      $("scriptText").textContent = latestScript;
       drawWaveform(data.samples);
-      drawSpectrogramApprox(data.events);
+      drawMelTransform(data.samples);
+      if (audioLoopEnabled) restartAudioLoop();
     }
 
     function drawWaveform(samples) {
@@ -473,16 +546,16 @@ HTML = r"""<!doctype html>
       const w = canvas.width;
       const h = canvas.height;
       ctx.clearRect(0, 0, w, h);
-      ctx.fillStyle = "#fbfcfe";
+      ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, w, h);
-      ctx.strokeStyle = "#d7dde5";
+      ctx.strokeStyle = "#a2a9b1";
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(0, h / 2);
       ctx.lineTo(w, h / 2);
       ctx.stroke();
 
-      ctx.strokeStyle = "#1677ff";
+      ctx.strokeStyle = "#0645ad";
       ctx.lineWidth = 2;
       ctx.beginPath();
       for (let x = 0; x < w; x++) {
@@ -499,35 +572,64 @@ HTML = r"""<!doctype html>
       ctx.stroke();
     }
 
-    function drawSpectrogramApprox(events) {
+    function hzToMel(hz) {
+      return 2595 * Math.log10(1 + hz / 700);
+    }
+
+    function melToHz(mel) {
+      return 700 * (Math.pow(10, mel / 2595) - 1);
+    }
+
+    function drawMelTransform(samples) {
       const canvas = $("spectrogram");
       const ctx = canvas.getContext("2d");
       const w = canvas.width;
       const h = canvas.height;
       const cols = 64;
       const rows = 64;
+      const nfft = 512;
+      const hop = 128;
       const cellW = w / cols;
       const cellH = h / rows;
+      const window = new Float32Array(nfft);
+      const values = new Float32Array(cols * rows);
+      const melMin = hzToMel(25);
+      const melMax = hzToMel(2000);
+      let minVal = Infinity;
+      let maxVal = -Infinity;
+
+      for (let i = 0; i < nfft; i++) {
+        window[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (nfft - 1));
+      }
+
+      for (let col = 0; col < cols; col++) {
+        const start = col * hop;
+        for (let row = 0; row < rows; row++) {
+          const mel = melMin + (row / (rows - 1)) * (melMax - melMin);
+          const freq = melToHz(mel);
+          let re = 0;
+          let im = 0;
+          for (let i = 0; i < nfft; i++) {
+            const idx = start + i;
+            const sample = idx < samples.length ? samples[idx] * window[i] : 0;
+            const phase = (2 * Math.PI * freq * i) / SAMPLE_RATE;
+            re += sample * Math.cos(phase);
+            im -= sample * Math.sin(phase);
+          }
+          const val = Math.log10(1e-10 + re * re + im * im);
+          values[col * rows + row] = val;
+          minVal = Math.min(minVal, val);
+          maxVal = Math.max(maxVal, val);
+        }
+      }
 
       ctx.clearRect(0, 0, w, h);
-      for (let x = 0; x < cols; x++) {
-        const t = (x / (cols - 1)) * WINDOW_SECONDS;
-        for (let y = 0; y < rows; y++) {
-          const freq = 25 + Math.pow(y / (rows - 1), 1.8) * 1975;
-          let energy = 0.002;
-          for (const event of events) {
-            const active = t >= event.start && t <= event.start + event.duration;
-            if (!active) continue;
-            const pos = (t - event.start) / event.duration;
-            const env = pos < 0.5 ? pos * 2 : (1 - pos) * 2;
-            const bw = Math.max(35, event.freq * 0.35);
-            const dist = (freq - event.freq) / bw;
-            energy += event.amp * env * Math.exp(-dist * dist);
-          }
-          const v = Math.min(1, Math.log10(1 + energy * 18));
-          const color = spectroColor(v);
-          ctx.fillStyle = color;
-          ctx.fillRect(x * cellW, h - (y + 1) * cellH, Math.ceil(cellW), Math.ceil(cellH));
+      for (let col = 0; col < cols; col++) {
+        for (let row = 0; row < rows; row++) {
+          const val = values[col * rows + row];
+          const v = (val - minVal) / Math.max(1e-6, maxVal - minVal);
+          ctx.fillStyle = spectroColor(Math.max(0, Math.min(1, v)));
+          ctx.fillRect(col * cellW, h - (row + 1) * cellH, Math.ceil(cellW), Math.ceil(cellH));
         }
       }
     }
@@ -539,22 +641,63 @@ HTML = r"""<!doctype html>
       return `rgb(${r},${g},${b})`;
     }
 
-    function playLatestAudio() {
+    function ensureAudioContext() {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      if (!AudioCtx) return;
-      const ctx = new AudioCtx();
-      const buffer = ctx.createBuffer(1, latestSamples.length, SAMPLE_RATE);
-      buffer.copyToChannel(latestSamples, 0);
-      const source = ctx.createBufferSource();
-      const gain = ctx.createGain();
-      gain.gain.value = 0.7;
-      source.buffer = buffer;
-      source.connect(gain);
-      gain.connect(ctx.destination);
-      source.start();
+      if (!AudioCtx) return null;
+      if (!audioCtx) audioCtx = new AudioCtx();
+      if (audioCtx.state === "suspended") audioCtx.resume();
+      return audioCtx;
+    }
+
+    function restartAudioLoop() {
+      const ctx = ensureAudioContext();
+      if (!ctx) return;
+      if (loopSource) {
+        try { loopSource.stop(); } catch (_) {}
+        loopSource.disconnect();
+        loopSource = null;
+      }
+      const loopSamples = new Float32Array(latestSamples.length * AUDIO_LOOP_REPEATS);
+      for (let r = 0; r < AUDIO_LOOP_REPEATS; r++) {
+        loopSamples.set(latestSamples, r * latestSamples.length);
+      }
+      const buffer = ctx.createBuffer(1, loopSamples.length, SAMPLE_RATE);
+      buffer.copyToChannel(loopSamples, 0);
+      loopSource = ctx.createBufferSource();
+      loopSource.buffer = buffer;
+      loopSource.loop = true;
+      if (!loopGain) {
+        loopGain = ctx.createGain();
+        loopGain.gain.value = 0.55;
+        loopGain.connect(ctx.destination);
+      }
+      loopSource.connect(loopGain);
+      loopSource.start();
+    }
+
+    function setAudioLoop(enabled) {
+      audioLoopEnabled = enabled;
+      if (enabled) {
+        restartAudioLoop();
+      } else if (loopSource) {
+        try { loopSource.stop(); } catch (_) {}
+        loopSource.disconnect();
+        loopSource = null;
+      }
+      updateAudioIcon();
+    }
+
+    function updateAudioIcon() {
+      const button = $("audioToggle");
+      button.setAttribute("aria-label", audioLoopEnabled ? "Mute continuous audio" : "Unmute continuous audio");
+      button.setAttribute("title", audioLoopEnabled ? "Mute continuous audio" : "Unmute continuous audio");
+      button.innerHTML = audioLoopEnabled
+        ? '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"></path><path d="M16 9.5c.7.7 1 1.5 1 2.5s-.3 1.8-1 2.5"></path><path d="M18.5 7c1.4 1.4 2.1 3.1 2.1 5s-.7 3.6-2.1 5"></path></svg>'
+        : '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9v6h4l5 4V5L8 9H4z"></path><path d="M19 9l-6 6"></path><path d="M13 9l6 6"></path></svg>';
     }
 
     renderSignal("NORMAL");
+    updateAudioIcon();
 
     const events = new EventSource("/events");
     events.onmessage = (event) => {

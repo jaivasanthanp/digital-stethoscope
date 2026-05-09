@@ -140,7 +140,8 @@ extern "C" int inference_run(const float *spec_in, size_t n_elements,
     int   best_class = 0;
     float best_prob  = -1.0f;
 
-    for (int c = 0; c < 4; c++) {
+    const int n_classes = s_output->dims->data[1];
+    for (int c = 0; c < n_classes; c++) {
         float prob = (out_data[c] - out_zp) * out_scale;
         if (prob > best_prob) {
             best_prob  = prob;

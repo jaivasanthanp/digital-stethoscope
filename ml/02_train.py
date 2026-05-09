@@ -118,7 +118,7 @@ def plot_confusion_matrix(y_true, y_pred, out_path):
 
 def main():
     parser = argparse.ArgumentParser(description="ResNet-10 training")
-    parser.add_argument("--data-dir",   default="ml/data")
+    parser.add_argument("--data-dir",   default="ml/data_circor")
     parser.add_argument("--epochs",     type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--lr",         type=float, default=1e-3)

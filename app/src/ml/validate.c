@@ -30,6 +30,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/uart.h>
 #include <zephyr/sys/ring_buffer.h>
+#include <zephyr/sys/util.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/devicetree.h>
 
@@ -157,9 +158,9 @@ void validate_thread_fn(void *p1, void *p2, void *p3)
         send_byte(confidence);
 
         static const char *class_names[] = {
-            "Normal", "SysMurmur", "DiaMurmur", "S3Gallop"
+            "Absent", "Present", "Unknown"
         };
-        const char *name = (out_class < 4) ? class_names[out_class] : "INVALID";
+        const char *name = (out_class < ARRAY_SIZE(class_names)) ? class_names[out_class] : "INVALID";
         LOG_INF("Validate[%2u] -> %s  conf=%u%%", idx, name, confidence);
     }
 }

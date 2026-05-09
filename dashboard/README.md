@@ -18,16 +18,23 @@ Use **Start Injection** to send `S` to the STM32. The firmware then renders synt
 PCG strings, runs DSP + TFLite Micro locally, and logs classifications. Use **Pause**
 to send `P`.
 
-The dashboard also renders the latest synthetic PCM waveform, a mel-style
-time-frequency view of the model input, and a **Play Heartbeat** button for the
-currently injected 2-second signal.
+The dashboard renders the latest synthetic PCM waveform, the 64-bin log
+time-frequency transform computed from that waveform, the exact synthetic script
+currently being injected, and a mute/unmute audio control for continuous playback.
+The firmware injects 2-second ML windows; the browser repeats the current window
+four times per audio buffer so the sound is less choppy while preserving the
+actual 2-second STM32 input.
 
 The dashboard parses UART log lines like:
 
 ```text
 Synthetic input string: SYSTOLIC
-Class: SysMurmur     Confidence: 29%  Latency: 102ms
+Class: Present       Confidence: 96%  Latency: 103ms
 ```
+
+The synthetic cycle includes `NORMAL`, `SYSTOLIC`, `DIASTOLIC`, `S3`, and
+`UNKNOWN`. The deployed ML labels are `Absent`, `Present`, and `Unknown`, so the
+old murmur-type script names are demo inputs, not the final classifier labels.
 
 ## Dependency
 

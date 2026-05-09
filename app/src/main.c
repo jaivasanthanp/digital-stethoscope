@@ -16,6 +16,7 @@
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/util.h>
 
 #include "audio/i2s_capture.h"
 #include "dsp/mel_spec.h"
@@ -41,7 +42,7 @@ K_MSGQ_DEFINE(spectrogram_q, sizeof(float) * SPEC_ROWS * SPEC_COLS, 1, 4);
 
 /* Result packet */
 struct heart_result {
-    uint8_t  class_id;       /* 0=Normal 1=SysMurmur 2=DiaMurmur 3=S3Gallop */
+    uint8_t  class_id;       /* 0=Absent 1=Present 2=Unknown */
     uint8_t  confidence;     /* 0–100 */
     uint32_t timestamp_ms;
 };
@@ -130,7 +131,7 @@ static void inference_thread(void *p1, void *p2, void *p3)
     inference_init();
 
     static const char *class_names[] = {
-        "Normal", "SysMurmur", "DiaMurmur", "S3Gallop"
+        "Absent", "Present", "Unknown"
     };
 
     while (1) {
@@ -151,7 +152,8 @@ static void inference_thread(void *p1, void *p2, void *p3)
         res.timestamp_ms = k_uptime_get_32();
 
         LOG_INF("Class: %-12s  Confidence: %3u%%  Latency: %ums",
-                class_names[class_id], res.confidence, latency);
+                (class_id < ARRAY_SIZE(class_names)) ? class_names[class_id] : "INVALID",
+                res.confidence, latency);
 
         k_msgq_put(&result_q, &res, K_NO_WAIT);
     }

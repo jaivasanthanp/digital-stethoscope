@@ -129,8 +129,8 @@ def generate_test_vectors(data_root: Path, n_per_class: int, out_path: Path,
     Load N spectrograms per class from test set, normalize, write to C header.
     Used by the on-device validation script and AudioCapture stub.
     """
-    class_names  = ["normal", "systolic", "diastolic", "s3gallop"]
-    class_labels = [0, 1, 2, 3]
+    class_names  = ["absent", "present", "unknown"]
+    class_labels = [0, 1, 2]
 
     all_specs  = []
     all_labels = []
@@ -169,7 +169,7 @@ def generate_test_vectors(data_root: Path, n_per_class: int, out_path: Path,
         "#define TEST_VECTOR_SAMPLES  (64 * 64)",
         "",
         "static const char *test_vector_class_names[] = {",
-        '    "Normal", "SystolicMurmur", "DiastolicMurmur", "S3Gallop"',
+        '    "Absent", "Present", "Unknown"',
         "};",
         "",
         f"static const int test_vector_labels[{n_vectors}] = {{",
@@ -205,7 +205,7 @@ def generate_test_vectors(data_root: Path, n_per_class: int, out_path: Path,
 
 def main():
     parser = argparse.ArgumentParser(description="Export model to C arrays")
-    parser.add_argument("--data-dir",     default="ml/data")
+    parser.add_argument("--data-dir",     default="ml/data_circor")
     parser.add_argument("--n-per-class",  type=int, default=3,
                         help="Test vectors per class (10 total for 4 classes with overlap)")
     args = parser.parse_args()
@@ -225,7 +225,11 @@ def main():
 
     # ── Mel filterbank ────────────────────────────────────────────────────────
     print("=== Generating mel filterbank weights ===")
-    generate_filterbank_header(app_dsp_dir / "mel_filterbank_weights.h")
+    filterbank_path = app_dsp_dir / "mel_filterbank_weights.h"
+    if filterbank_path.exists():
+        print(f"  Keeping existing filterbank weights -> {filterbank_path}")
+    else:
+        generate_filterbank_header(filterbank_path)
 
     # ── Normalization params ──────────────────────────────────────────────────
     if norm_path.exists():

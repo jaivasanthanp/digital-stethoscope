@@ -9,6 +9,7 @@ __pycache__/
 *.pyo
 ml/data/raw/
 ml/data/processed/
+ml/data_circor/
 *.egg-info/
 
 # Large training artifacts — model_data.cc + .tflite files are checked in
