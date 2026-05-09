@@ -88,11 +88,12 @@ STM32U575  --  Zephyr RTOS (4 threads, message queues)
 - Held-out test metrics with the gate: accuracy `73.2%`, balanced accuracy `59.6%`, `Unknown` recall `56.8%`. This intentionally trades overall accuracy for safer minority/uncertainty handling.
 - Export completed into STM32 source: `app/src/ml/model_data.cc`, `app/src/dsp/normalization_params.h`, and `app/src/ml/test_vectors.h`.
 - STM32U575 synthetic firmware build completed successfully in `build_stm32_synth/`.
-- Firmware build size with the CirCor model and validation vectors: FLASH `561632 B / 2 MB` (`26.78%`), RAM `337100 B / 768 KB` (`42.86%`).
-- Flash to STM32U575 completed successfully through ST-LINK/OpenOCD (`build_stm32_synth/zephyr/zephyr.hex`, `561632` bytes written).
+- Firmware build size with the CirCor model, validation vectors, and Unknown gate: FLASH `561864 B / 2 MB` (`26.79%`), RAM `337100 B / 768 KB` (`42.86%`).
+- Flash to STM32U575 completed successfully through ST-LINK/OpenOCD (`build_stm32_synth/zephyr/zephyr.hex`, `561872` bytes written).
 - On-device validation over `COM6` passed: STM32U575 matched the Python TFLite reference on `9/9` vectors (`100.0%` reference match).
-- Current true-label score on the small generated validation-vector subset is `4/9` (`44.4%`), so deployment is correct, but minority-class classifier quality still needs improvement before it is a strong diagnostic model.
-- Next engineering steps: improve Present/Unknown recall with real Unknown audio sampling, stronger augmentation, and possibly a binary `Absent` vs `Present/Unknown` safety gate.
+- Current true-label score on the small generated validation-vector subset is `6/9` (`66.7%`) after the Unknown gate; all three smoke-test Unknown vectors return `Unknown`.
+- Live dashboard is running locally at `http://127.0.0.1:8765` with synthetic injection, waveform, mel-style transform, continuous audio mute/unmute, and UART inference logs.
+- Handoff for tomorrow: improve Present/Unknown recall with real Unknown audio sampling, stronger augmentation, and possibly a binary `Absent` vs `Present/Unknown` safety gate.
 
 ### Model: ResNet-10 with SE blocks
 
@@ -145,7 +146,7 @@ All numbers measured on the physical NUCLEO-U575ZI-Q board via UART.
 |--------|--------|----------|
 | Inference latency | < 150 ms | **102 ms** |
 | Tensor arena used | ~95 KB est. | **29.3 KB** (28% of allocation) |
-| FLASH usage | < 2 MB | **561632 B (26.78%)** with validation vectors |
+| FLASH usage | < 2 MB | **561864 B (26.79%)** with validation vectors |
 | RAM usage | < 768 KB | **338 KB (44%)** |
 | On-device vs Python TFLite | > 95% match | **9/9 = 100%** |
 
