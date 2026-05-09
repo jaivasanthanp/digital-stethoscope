@@ -39,6 +39,20 @@ static TfLiteTensor              *s_input       = nullptr;
 static TfLiteTensor              *s_output      = nullptr;
 
 /*
+ * Validation-calibrated uncertainty gate.
+ *
+ * Tuned on CirCor validation data after INT8 conversion. It promotes uncertain
+ * Absent/Present argmax results to Unknown when the Unknown probability is
+ * non-trivial and either the winning probability is modest or the top-2 margin
+ * is small. This raises held-out Unknown recall at the cost of lower overall
+ * accuracy, which is preferable for an advisory screening prototype.
+ */
+#define UNKNOWN_CLASS_ID       2
+#define UNKNOWN_MIN_PROB       0.10f
+#define UNKNOWN_TOP_MAX        0.60f
+#define UNKNOWN_MARGIN_MAX     0.41f
+
+/*
  * Op resolver for ResNet-10 INT8 with SE blocks.
  * Ops determined by inspecting resnet10_int8.tflite with:
  *   python -c "import tensorflow as tf; interp = tf.lite.Interpreter('ml/models/resnet10_int8.tflite');
@@ -137,16 +151,34 @@ extern "C" int inference_run(const float *spec_in, size_t n_elements,
     const int   out_zp    = s_output->params.zero_point;
     const int8_t *out_data = s_output->data.int8;
 
-    int   best_class = 0;
-    float best_prob  = -1.0f;
+    int   best_class   = 0;
+    float best_prob    = -1.0f;
+    float second_prob  = -1.0f;
+    float unknown_prob = 0.0f;
 
     const int n_classes = s_output->dims->data[1];
     for (int c = 0; c < n_classes; c++) {
         float prob = (out_data[c] - out_zp) * out_scale;
         if (prob > best_prob) {
+            second_prob = best_prob;
             best_prob  = prob;
             best_class = c;
+        } else if (prob > second_prob) {
+            second_prob = prob;
         }
+
+        if (c == UNKNOWN_CLASS_ID) {
+            unknown_prob = prob;
+        }
+    }
+
+    const float margin = best_prob - second_prob;
+    if (n_classes > UNKNOWN_CLASS_ID &&
+        best_class != UNKNOWN_CLASS_ID &&
+        unknown_prob >= UNKNOWN_MIN_PROB &&
+        (best_prob <= UNKNOWN_TOP_MAX || margin <= UNKNOWN_MARGIN_MAX)) {
+        best_class = UNKNOWN_CLASS_ID;
+        best_prob = unknown_prob;
     }
 
     *confidence = (uint8_t)(best_prob * 100.0f + 0.5f);

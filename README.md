@@ -83,15 +83,16 @@ STM32U575  --  Zephyr RTOS (4 threads, message queues)
 - Python dataloader sanity check passes on the new dataset.
 - Firmware, dashboard, export, and validation labels have been updated to the deployed three-class mapping.
 - Keras ResNet-10 retraining and INT8 post-training quantization completed on CPU.
-- Current deployed model results: float32 test accuracy `81.2%`, INT8 test accuracy `81.5%`, quantization delta `-0.36%`, INT8 model size `104688` bytes (`102.2 KB`).
-- Held-out per-class recall: `Absent 95%`, `Present 41%`, `Unknown 19%`; balanced accuracy is `52.0%`. Overall accuracy improved, but minority-class recall still needs more work before clinical use.
+- Current deployed model results before uncertainty gating: float32 test accuracy `81.2%`, INT8 test accuracy `81.5%`, quantization delta `-0.36%`, INT8 model size `104688` bytes (`102.2 KB`).
+- A validation-calibrated Unknown gate is applied after softmax on the STM32. It promotes uncertain Absent/Present outputs to `Unknown` when `unknown_prob >= 0.10` and either `top_prob <= 0.60` or `top2_margin <= 0.41`.
+- Held-out test metrics with the gate: accuracy `73.2%`, balanced accuracy `59.6%`, `Unknown` recall `56.8%`. This intentionally trades overall accuracy for safer minority/uncertainty handling.
 - Export completed into STM32 source: `app/src/ml/model_data.cc`, `app/src/dsp/normalization_params.h`, and `app/src/ml/test_vectors.h`.
 - STM32U575 synthetic firmware build completed successfully in `build_stm32_synth/`.
 - Firmware build size with the CirCor model and validation vectors: FLASH `561632 B / 2 MB` (`26.78%`), RAM `337100 B / 768 KB` (`42.86%`).
 - Flash to STM32U575 completed successfully through ST-LINK/OpenOCD (`build_stm32_synth/zephyr/zephyr.hex`, `561632` bytes written).
 - On-device validation over `COM6` passed: STM32U575 matched the Python TFLite reference on `9/9` vectors (`100.0%` reference match).
 - Current true-label score on the small generated validation-vector subset is `4/9` (`44.4%`), so deployment is correct, but minority-class classifier quality still needs improvement before it is a strong diagnostic model.
-- Next engineering steps: improve Present/Unknown recall with threshold tuning, sampling strategy, stronger augmentation, and possibly a binary `Absent` vs `Present/Unknown` safety gate.
+- Next engineering steps: improve Present/Unknown recall with real Unknown audio sampling, stronger augmentation, and possibly a binary `Absent` vs `Present/Unknown` safety gate.
 
 ### Model: ResNet-10 with SE blocks
 
@@ -126,12 +127,13 @@ INT8 post-training quantization via TFLite converter with 200-clip representativ
 |--------|-------|
 | Float32 accuracy | 81.2% |
 | INT8 accuracy | 81.5% |
-| Accuracy drop | **-0.36%** (INT8 slightly higher on test split) |
+| INT8 + Unknown gate accuracy | 73.2% |
+| Accuracy drop | **-0.36%** before gate (INT8 slightly higher on test split) |
 | Model size | ~313 KB float32 -> **102.2 KB INT8** |
 
 > **Note on accuracy:** the deployed CirCor model uses the official patient-level
-> murmur labels. Overall accuracy is now stronger, but Present/Unknown recall is
-> still the limiting metric for diagnostic usefulness.
+> murmur labels. The post-softmax Unknown gate increases Unknown recall from
+> about 19% to 56.8%, at the cost of lower overall accuracy.
 
 ---
 

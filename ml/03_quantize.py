@@ -19,6 +19,7 @@ Output:
 """
 
 import argparse
+import json
 import numpy as np
 from pathlib import Path
 
@@ -30,6 +31,10 @@ print(f"TensorFlow: {tf.__version__}")
 CLASS_NAMES = ["absent", "present", "unknown"]
 N_CLASSES   = len(CLASS_NAMES)
 IMG_SIZE    = 64
+UNKNOWN_CLASS_ID = 2
+UNKNOWN_MIN_PROB = 0.10
+UNKNOWN_TOP_MAX = 0.60
+UNKNOWN_MARGIN_MAX = 0.41
 
 
 # ── Model definition ──────────────────────────────────────────────────────────
@@ -169,13 +174,29 @@ def load_calibration_data(processed_dir, n_clips, norm_mean, norm_std):
 
 # ── TFLite accuracy helper ────────────────────────────────────────────────────
 
-def eval_tflite(model_bytes, test_specs, test_labels):
+def apply_unknown_gate(probs: np.ndarray) -> np.ndarray:
+    preds = np.argmax(probs, axis=1)
+    sorted_probs = np.sort(probs, axis=1)
+    top = sorted_probs[:, -1]
+    second = sorted_probs[:, -2]
+    unknown = probs[:, UNKNOWN_CLASS_ID]
+    gate = (
+        (preds != UNKNOWN_CLASS_ID) &
+        (unknown >= UNKNOWN_MIN_PROB) &
+        ((top <= UNKNOWN_TOP_MAX) | ((top - second) <= UNKNOWN_MARGIN_MAX))
+    )
+    gated = preds.copy()
+    gated[gate] = UNKNOWN_CLASS_ID
+    return gated
+
+
+def eval_tflite(model_bytes, test_specs, test_labels, use_unknown_gate=False):
     interp = tf.lite.Interpreter(model_content=model_bytes)
     interp.allocate_tensors()
     inp_d = interp.get_input_details()[0]
     out_d = interp.get_output_details()[0]
 
-    preds = []
+    probs = []
     for spec in test_specs:
         inp = spec[np.newaxis]
         if inp_d['dtype'] == np.int8:
@@ -187,9 +208,10 @@ def eval_tflite(model_bytes, test_specs, test_labels):
         if out_d['dtype'] == np.int8:
             scale, zp = out_d['quantization']
             out = (out.astype(np.float32) - zp) * scale
-        preds.append(int(np.argmax(out)))
+        probs.append(out.reshape(-1))
 
-    preds = np.array(preds)
+    probs = np.stack(probs)
+    preds = apply_unknown_gate(probs) if use_unknown_gate else np.argmax(probs, axis=1)
     acc   = (preds == test_labels).mean()
     return acc, preds
 
@@ -367,10 +389,23 @@ def main():
 
         acc_f32,  _ = eval_tflite(tflite_f32,  test_specs, test_lbls_arr)
         acc_int8, _ = eval_tflite(tflite_int8, test_specs, test_lbls_arr)
+        acc_int8_gated, _ = eval_tflite(tflite_int8, test_specs, test_lbls_arr,
+                                        use_unknown_gate=True)
         drop = acc_f32 - acc_int8
 
         print(f"  Float32 TFLite: {acc_f32*100:.1f}%")
         print(f"  INT8    TFLite: {acc_int8*100:.1f}%")
+        print(f"  INT8 + Unknown gate: {acc_int8_gated*100:.1f}%")
+        gate_path = model_dir / "unknown_gate.json"
+        gate_path.write_text(json.dumps({
+            "unknown_class_id": UNKNOWN_CLASS_ID,
+            "unknown_min_prob": UNKNOWN_MIN_PROB,
+            "top_prob_max": UNKNOWN_TOP_MAX,
+            "top2_margin_max": UNKNOWN_MARGIN_MAX,
+            "calibrated_on": "CirCor validation split",
+            "goal": "increase Unknown recall for advisory uncertainty handling",
+        }, indent=2) + "\n")
+        print(f"  Unknown gate:   {gate_path}")
         print(f"  Drop:           {drop*100:.2f}%  "
               f"{'PASS (<2%)' if drop < 0.02 else 'FAIL (>2%) — increase --calib-clips'}")
 

@@ -41,6 +41,10 @@ from pathlib import Path
 
 CLASS_NAMES = ["Absent", "Present", "Unknown"]
 RESPONSE_MAGIC = 0xA5
+UNKNOWN_CLASS_ID = 2
+UNKNOWN_MIN_PROB = 0.10
+UNKNOWN_TOP_MAX = 0.60
+UNKNOWN_MARGIN_MAX = 0.41
 
 
 # ---------------------------------------------------------------------------
@@ -64,8 +68,22 @@ def run_tflite_reference(interp, inp_det, out_det, spec: np.ndarray):
         scale, zero_pt = out_det["quantization"]
         out = (out.astype(np.float32) - zero_pt) * scale
 
-    class_id   = int(np.argmax(out))
-    confidence = float(np.max(out))
+    probs = out.reshape(-1)
+    class_id = int(np.argmax(probs))
+    confidence = float(probs[class_id])
+
+    sorted_probs = np.sort(probs)
+    top = float(sorted_probs[-1])
+    second = float(sorted_probs[-2]) if len(sorted_probs) > 1 else 0.0
+    unknown = float(probs[UNKNOWN_CLASS_ID]) if len(probs) > UNKNOWN_CLASS_ID else 0.0
+
+    if (len(probs) > UNKNOWN_CLASS_ID and
+            class_id != UNKNOWN_CLASS_ID and
+            unknown >= UNKNOWN_MIN_PROB and
+            (top <= UNKNOWN_TOP_MAX or (top - second) <= UNKNOWN_MARGIN_MAX)):
+        class_id = UNKNOWN_CLASS_ID
+        confidence = unknown
+
     return class_id, confidence
 
 

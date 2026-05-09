@@ -28,9 +28,11 @@ void inference_init(void);
  *
  * spec_in      : float32[64*64] row-major, normalized to zero-mean unit-var
  * n_elements   : must be 64*64 = 4096
- * confidence   : output — confidence of winning class, 0–100
+ * confidence   : output — confidence of returned class, 0–100
  *
- * Returns: class_id (0=Absent, 1=Present, 2=Unknown)
+ * Returns: class_id (0=Absent, 1=Present, 2=Unknown). A validation-calibrated
+ *          uncertainty gate may promote low-margin Absent/Present results to
+ *          Unknown.
  *          -1 on error
  */
 int inference_run(const float *spec_in, size_t n_elements, uint8_t *confidence);
