@@ -8,7 +8,7 @@ target_sources(app PRIVATE
     src/main.c
 )
 
-# Audio capture (I2S / stub)
+# Synthetic PCG source
 target_sources(app PRIVATE
     src/audio/i2s_capture.c
 )

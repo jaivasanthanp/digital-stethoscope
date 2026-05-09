@@ -9,8 +9,9 @@
  *   InferenceThread     (prio 6)  → result_q
  *   CommThread          (prio 8)  → UART TX to nRF52840
  *
- * During development (mic not wired): AudioCaptureThread is a stub
- * that replays a hardcoded test vector on a 2-second timer.
+ * Current revision: AudioCaptureThread uses synthetic PCG strings on a
+ * dashboard-controlled 2-second timer. The STM32U575 still runs DSP and
+ * ML inference locally.
  */
 
 #include <zephyr/kernel.h>
@@ -29,8 +30,7 @@ LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
  * ------------------------------------------------------------------------- */
 
 /* Audio buffer: 8000 samples × float32 = 32 KB per message
- * Depth 1 for Phase 0 (no double-buffering until I2S DMA is wired).
- * Increase to depth 2 in Phase 4 when real I2S capture runs. */
+ * Depth 1 is enough for the current synthetic string source. */
 #define AUDIO_BUF_SAMPLES  8000
 K_MSGQ_DEFINE(audio_q, sizeof(float) * AUDIO_BUF_SAMPLES, 1, 4);
 
@@ -80,7 +80,7 @@ static void audio_capture_thread(void *p1, void *p2, void *p3)
 
     LOG_INF("AudioCaptureThread started");
 
-    /* audio_capture_init() either sets up real I2S or the stub timer */
+    /* Starts the synthetic source in paused mode. Dashboard sends 'S' to run. */
     audio_capture_init();
 
     while (1) {

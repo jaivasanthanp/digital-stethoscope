@@ -1,31 +1,22 @@
 /*
- * Digital Stethoscope — STM32U575 devicetree overlay
+ * Digital Stethoscope - STM32U575 devicetree overlay
  *
- * NOTE: STM32U575 uses SAI (Serial Audio Interface) for audio, not I2S.
- * Zephyr exposes the STM32 SAI as an I2S-compatible device via the
- * i2s_stm32_sai.c driver (compatible = "st,stm32-sai").
+ * Current revision:
+ *   - No active ICS-43434 microphone path.
+ *   - Synthetic PCG strings are rendered in firmware and classified locally.
+ *   - USART3 remains enabled for the nRF52840 UART bridge.
  *
- * ICS-43434 MEMS microphone wiring — SAI1 Block B (receiver):
- *   ICS-43434 BCLK  -> PB3   (sai1_sck_b_pb3)
- *   ICS-43434 LRCLK -> PB6   (sai1_fs_b_pb6)
- *   ICS-43434 DOUT  -> PB5   (sai1_sd_b_pb5)
- *   ICS-43434 L/R   -> GND   (selects left channel)
- *   ICS-43434 VDD   -> 3.3V
- *
- * Verify PB3/PB5/PB6 are free on NUCLEO-U575ZI-Q CN7/CN10 headers.
- *
- * USART3 (PD8/PD9) — UART bridge to nRF52840 at 115200 baud.
+ * Future microphone option:
+ *   STM32U575 uses SAI rather than a classic I2S peripheral. If a compatible
+ *   SAI/I2S microphone is added later, re-enable &sai1_b and CONFIG_I2S/DMA.
  */
 
-/* SAI1 Block B — ICS-43434 receiver (RX only) */
+/* SAI1 Block B is intentionally disabled for the synthetic-data build. */
 &sai1_b {
-    status = "okay";
-    pinctrl-0 = <&sai1_sck_b_pb3 &sai1_fs_b_pb6 &sai1_sd_b_pb5>;
-    pinctrl-names = "default";
-    dma-names = "rx";
+    status = "disabled";
 };
 
-/* USART3 — bridge to nRF52840 */
+/* USART3 - bridge to nRF52840 */
 &usart3 {
     status = "okay";
     pinctrl-0 = <&usart3_tx_pd8 &usart3_rx_pd9>;

@@ -45,7 +45,7 @@ if [ "$BLE_MODE" -eq 1 ]; then
 else
     APP_DIR="app"
     BOARD="nucleo_u575zi_q"
-    BUILD_DIR="build_stm32"
+    BUILD_DIR="build_stm32_synth"
 fi
 
 echo "Building  : $APP_DIR  (board: $BOARD)"
@@ -62,5 +62,9 @@ west build $PRISTINE \
 echo ""
 echo "Build complete:"
 echo "  Binary : $BUILD_DIR/zephyr/zephyr.elf"
-echo "  Flash  : west flash --build-dir $BUILD_DIR"
+if [ "$BLE_MODE" -eq 1 ]; then
+    echo "  Flash  : west flash --build-dir $BUILD_DIR"
+else
+    echo "  Flash  : west flash --build-dir $BUILD_DIR --runner openocd"
+fi
 echo "  Debug  : west debug --build-dir $BUILD_DIR"

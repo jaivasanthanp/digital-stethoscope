@@ -10,6 +10,9 @@
  * Protocol:
  *   Host -> STM32 : 'T' (0x54) + 2-byte vector index (uint16 little-endian)
  *   STM32 -> Host : 0xA5 (magic) + class_id (uint8) + confidence (uint8)
+ *   Host -> STM32 : 'S' to start synthetic PCG injection
+ *   Host -> STM32 : 'P' to pause synthetic PCG injection
+ *   STM32 -> Host : 0xA6 + command + state
  *
  * The 0xA5 magic prefix lets the Python script distinguish the binary
  * response from any LOG text appearing on the same UART.

@@ -2,10 +2,17 @@
 
 ## Project Identity
 
-**What this is:** A wearable digital stethoscope that captures heart sounds via MEMS microphone,
-computes mel-spectrograms on-device, runs a quantized ResNet-10 INT8 CNN to classify
-Normal / Systolic Murmur / Diastolic Murmur / S3 Gallop in real time, and transmits
-results over BLE to a phone. No cloud. No CubeIDE. Pure Zephyr RTOS on both MCUs.
+**What this is:** A wearable digital stethoscope prototype that currently uses synthetic
+PCG strings as the input source on the STM32U575, computes mel-spectrograms on-device,
+runs a quantized ResNet-10 INT8 CNN to classify Normal / Systolic Murmur / Diastolic
+Murmur / S3 Gallop in real time, and transmits results over BLE to a phone. No cloud.
+No CubeIDE. Pure Zephyr RTOS on both MCUs.
+
+**Current input-source decision (May 2026):** ICS-43434 is discontinued for this
+revision and is not part of the active firmware path. The STM32U575 locally renders
+compact synthetic heart-sound strings into 2-second PCM windows, then runs the same
+DSP + TFLite Micro inference chain locally. SAI/I2S microphone support may be added
+later behind `audio_capture_init()` / `audio_capture_get_window()`.
 
 **Why it exists:** Final exam project for ML course at USST Shanghai (Messtechnik und Sensorik
 exchange semester). Also a portfolio piece targeting German medtech embedded internships
@@ -22,7 +29,7 @@ edge AI, Zephyr on STM32, and BLE GATT — the exact skill stack those employers
 |---|---|---|
 | STM32U575 NUCLEO-U575ZI-Q | Cortex-M33, audio capture, DSP, CNN inference | In hand |
 | nRF52840 DK (or Adafruit Feather) | Zephyr BLE GATT server, result broadcast | Arriving ~Apr 24 |
-| ICS-43434 MEMS microphone | I2S digital mic, 4 kHz audio capture | Arriving ~Apr 19 |
+| ICS-43434 MEMS microphone | Discontinued in current revision; future optional SAI/I2S source | Not active |
 
 **Budget constraint:** €50 excluding boards. All additional components sourced in Shanghai
 (Taobao/LCSC) — dramatically cheaper than Germany. PCB from JLCPCB (5x 2-layer, ~¥30).
@@ -118,6 +125,27 @@ digital-stethoscope/
 ---
 
 ## Signal Chain (End-to-End)
+
+Current firmware path:
+
+```
+Synthetic PCG string
+    |  LABEL|start,duration,frequency,amplitude;...
+    v
+STM32U575 synthetic source
+    |  renders float32 PCM @ 4000 Hz, 8000 samples per 2-second window
+    v
+DSPTask
+    |  Hann window -> CMSIS-DSP FFT -> mel filterbank -> log10 -> normalize
+    v
+InferenceTask
+    |  TFLite Micro ResNet-10 INT8 runs locally on STM32U575
+    v
+CommTask
+    |  UART result packet to nRF52840, then BLE notify
+```
+
+Legacy/future optional microphone path:
 
 ```
 ICS-43434 (I2S)
@@ -266,9 +294,9 @@ CONFIG_UART_CONSOLE=y
 CONFIG_LOG=y
 CONFIG_LOG_DEFAULT_LEVEL=3
 
-# SAI audio (STM32U575 uses SAI not I2S — same Kconfig, different driver)
-CONFIG_I2S=y
-CONFIG_DMA=y
+# Audio source: synthetic PCG strings rendered locally on STM32U575
+# CONFIG_I2S is not set
+# CONFIG_DMA is not set
 
 # CMSIS-DSP for STFT — NOTE: symbol is CMSIS_DSP_BASICMATH (not BASIC_MATH)
 CONFIG_CMSIS_DSP=y
@@ -390,7 +418,7 @@ export ZEPHYR_BASE="C:/Users/jaiva/zephyrproject/zephyr"
 export ZEPHYR_SDK_INSTALL_DIR="C:/Users/jaiva/Desktop/zephyr/zephyr-sdk-1.0.1_windows-x86_64_gnu/zephyr-sdk-1.0.1"
 export PATH="/c/ProgramData/chocolatey/bin:/c/Users/jaiva/Desktop/zephyr/zephyr-sdk-1.0.1_windows-x86_64_gnu/zephyr-sdk-1.0.1/gnu/arm-zephyr-eabi/bin:$PATH"
 cd Digital_Stethoscope
-west build --board nucleo_u575zi_q --build-dir build_stm32 app \
+west build --board nucleo_u575zi_q --build-dir build_stm32_synth app \
     -- "-DPython3_EXECUTABLE=C:/Users/jaiva/AppData/Local/Programs/Python/Python314/python.exe"
 ```
 
@@ -455,14 +483,14 @@ west build --board nucleo_u575zi_q --build-dir build_stm32 app \
 - [x] Real TFLite inference in `app/src/ml/inference.cc` (MicroMutableOpResolver, 12 ops)
 - [x] model_data.cc: 102.3 KB INT8 model as C array
 - [x] **Flash to hardware via OpenOCD** (`west flash --runner openocd`)
-      Flash runner: `west flash --build-dir build_stm32 --runner openocd`
+Flash runner: `west flash --build-dir build_stm32_synth --runner openocd`
       (pyocd pack index lacks STM32U5 series; OpenOCD has stm32u5x.cfg in Zephyr SDK)
 - [x] **MEASURED UART output on hardware:**
       ```
       *** Booting Zephyr OS build v4.4.0-rc1-178-gccfd5efa09f9 ***
       [00:00:00.000] <inf> main: === Digital Stethoscope v0.1 ===
       [00:00:00.000] <inf> main: AudioCaptureThread started
-      [00:00:00.000] <inf> i2s_capture: Audio: stub mode (real I2S not yet wired)
+      [00:00:00.000] <inf> i2s_capture: Audio: synthetic string source active (ICS-43434 disabled)
       [00:00:00.004] <inf> mel_spec: mel_spec: init OK (FFT=512, mels=64, frames=62)
       [00:00:00.004] <inf> main: InferenceThread started
       [00:00:00.000] <inf> inference: TFLite Micro initialized
@@ -491,8 +519,8 @@ west build --board nucleo_u575zi_q --build-dir build_stm32 app \
   MEAN, MUL, PACK, RESHAPE, SHAPE, SOFTMAX, STRIDED_SLICE (12 total)
 - pyocd pack index does NOT include STM32U5 series — use `--runner openocd` instead
   OpenOCD at: `zephyr-sdk-1.0.1/hosttools/openocd/bin/openocd.exe` with `stm32u5x.cfg`
-- SAI clock error at boot is expected (I2S domain clock fails without real mic configured)
-  The stub mode takes over correctly; no functional impact until Phase 4
+- Current synthetic-data build disables SAI/I2S, so the old mic clock warning should not
+  appear. Revisit SAI clocking only if a future microphone source is enabled.
 - `uart_poll_in()` does NOT work for UART RX when `CONFIG_UART_INTERRUPT_DRIVEN=y` is
   active on the same device — the ISR may consume bytes before poll_in() reads them.
   Fix: use `uart_irq_callback_user_data_set()` + `uart_irq_rx_enable()` + ring buffer.

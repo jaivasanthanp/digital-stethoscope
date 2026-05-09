@@ -3,10 +3,15 @@
 > Real-time PCG classification on STM32U575 using TFLite Micro + Zephyr RTOS.
 > No cloud. No proprietary IDEs. Pure embedded ML at 102 ms per inference.
 
-A wearable digital stethoscope that captures heart sounds via MEMS microphone,
-computes mel-spectrograms on-device, runs a quantized ResNet-10 INT8 CNN to classify
-**Normal / Systolic Murmur / Diastolic Murmur / S3 Gallop** in real time, and
-transmits results over BLE to a phone.
+A wearable digital stethoscope prototype that currently feeds synthetic PCG strings
+into the STM32U575, computes mel-spectrograms on-device, runs a quantized ResNet-10
+INT8 CNN to classify **Normal / Systolic Murmur / Diastolic Murmur / S3 Gallop**
+in real time, and transmits results over BLE to a phone.
+
+Current hardware note: the ICS-43434 microphone is discontinued for this revision.
+The STM32U575 renders compact synthetic heart-sound strings into 2-second PCM
+windows and runs the DSP + ML pipeline locally. A SAI/I2S microphone source may be
+added later behind the existing audio source API.
 
 Built as a final project for the ML course at USST Shanghai (Messtechnik und Sensorik
 exchange, Hochschule Coburg)
@@ -19,15 +24,17 @@ exchange, Hochschule Coburg)
 |-----------|------|
 | STM32U575 NUCLEO-U575ZI-Q | Cortex-M33 @ 160 MHz — audio capture, DSP, CNN inference |
 | nRF52840 DK | Zephyr BLE GATT server — broadcasts result to phone |
-| ICS-43434 MEMS microphone | I2S digital mic — 4 kHz audio capture |
+| Synthetic PCG strings | Current input source, rendered locally to 4 kHz PCM |
+| ICS-43434 MEMS microphone | Discontinued in this revision; future optional SAI/I2S input |
 
 ---
 
 ## System Architecture
 
 ```
-ICS-43434 (I2S / SAI1-B)
-    |  16-bit PCM @ 4000 Hz, left channel
+Synthetic PCG string
+    |  LABEL|start,duration,frequency,amplitude;...
+    |  rendered locally to float32 PCM @ 4000 Hz
     v
 STM32U575  --  Zephyr RTOS (4 threads, message queues)
     |
@@ -119,7 +126,7 @@ All numbers measured on the physical NUCLEO-U575ZI-Q board via UART.
 *** Booting Zephyr OS build v4.4.0-rc1 ***
 [00:00:00.000] <inf> main: === Digital Stethoscope v0.1 ===
 [00:00:00.000] <inf> main: AudioCaptureThread started
-[00:00:00.000] <inf> i2s_capture: Audio: stub mode (real I2S not yet wired)
+[00:00:00.000] <inf> i2s_capture: Audio: synthetic string source active (ICS-43434 disabled)
 [00:00:00.004] <inf> mel_spec: mel_spec: init OK (FFT=512, mels=64, frames=62)
 [00:00:00.004] <inf> main: InferenceThread started
 [00:00:00.000] <inf> inference: TFLite Micro initialized
@@ -158,11 +165,11 @@ digital-stethoscope/
 |-- app/                             <- STM32U575 Zephyr application
 |   |-- CMakeLists.txt
 |   |-- prj.conf                     <- Kconfig (TFLite Micro, CMSIS-DSP, BLE UART)
-|   |-- app.overlay                  <- SAI1-B (mic) + USART3 (nRF bridge)
+|   |-- app.overlay                  <- synthetic build + USART3 (nRF bridge)
 |   `-- src/
 |       |-- main.c                   <- 4 Zephyr threads + message queues
 |       |-- audio/
-|       |   `-- i2s_capture.c        <- SAI DMA capture + synthetic stub
+|       |   `-- i2s_capture.c        <- synthetic PCG string renderer
 |       |-- dsp/
 |       |   |-- mel_spec.c           <- STFT + mel filterbank + normalization
 |       |   |-- mel_filterbank_weights.h  <- precomputed 64x257 float32 weights
@@ -223,11 +230,11 @@ export ZEPHYR_SDK_INSTALL_DIR="C:/Users/<user>/Desktop/zephyr/zephyr-sdk-1.0.1_.
 export PATH="/c/ProgramData/chocolatey/bin:$ZEPHYR_SDK_INSTALL_DIR/gnu/arm-zephyr-eabi/bin:$PATH"
 
 cd Digital_Stethoscope
-west build --board nucleo_u575zi_q --build-dir build_stm32 app \
+west build --board nucleo_u575zi_q --build-dir build_stm32_synth app \
     -- "-DPython3_EXECUTABLE=C:/Users/<user>/AppData/Local/Programs/Python/Python314/python.exe"
 
 # Flash via OpenOCD (pyocd lacks STM32U5 pack)
-west flash --build-dir build_stm32 --runner openocd
+west flash --build-dir build_stm32_synth --runner openocd
 ```
 
 ### nRF52840 BLE firmware
@@ -277,7 +284,7 @@ Connect with **nRF Connect** (iOS/Android), subscribe to notifications, observe 
 | 1 | ML pipeline — preprocess, train, quantize, export | Done |
 | 2 | TFLite Micro on STM32U575 — flashed, measured | Done |
 | 3 | STFT/Mel DSP chain on U575 — full pipeline running | Done |
-| 4 | ICS-43434 SAI mic bring-up | Pending (mic arriving ~Apr 19) |
+| 4 | Synthetic PCG string input on STM32U575 | Done |
 | 5 | nRF52840 BLE — firmware built, awaiting board | Pending (board arriving Apr 24) |
 | 6 | Polish, README, demo video | In progress |
 

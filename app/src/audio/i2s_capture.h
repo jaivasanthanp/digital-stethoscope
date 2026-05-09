@@ -3,14 +3,25 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 /*
- * Initialize I2S audio capture.
- * In stub mode (CONFIG_AUDIO_STUB=y) this sets up a 2-second timer
- * that replays test vectors from test_vectors.h.
- * In hardware mode it configures the ICS-43434 via the I2S peripheral.
+ * Initialize the synthetic PCG source.
+ *
+ * The current project revision has no active ICS-43434 path. The STM32U575
+ * receives a compact synthetic heart-sound script, renders it into a 2-second
+ * float32 PCM window, and feeds that through the on-device DSP + ML pipeline.
+ * A real SAI/I2S microphone source can be added later behind this API.
  */
 void audio_capture_init(void);
+
+/*
+ * Runtime control used by the serial dashboard.
+ * Injection starts paused; audio_capture_set_enabled(true) begins feeding
+ * synthetic windows into the DSP/ML pipeline.
+ */
+void audio_capture_set_enabled(bool enabled);
+bool audio_capture_is_enabled(void);
 
 /*
  * Blocking call. Returns when a full 2-second window (8000 samples at 4 kHz)

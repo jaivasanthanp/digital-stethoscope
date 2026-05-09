@@ -25,6 +25,7 @@
 #include "validate.h"
 #include "inference.h"
 #include "test_vectors.h"
+#include "audio/i2s_capture.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/uart.h>
@@ -36,7 +37,10 @@ LOG_MODULE_REGISTER(validate, LOG_LEVEL_INF);
 
 /* ── Response framing ───────────────────────────────────────────────────── */
 #define VALIDATE_MAGIC   0xA5u
+#define CONTROL_MAGIC    0xA6u
 #define CMD_TEST_VECTOR  'T'
+#define CMD_SYNTH_START  'S'
+#define CMD_SYNTH_PAUSE  'P'
 
 /* ── Console UART ───────────────────────────────────────────────────────── */
 static const struct device *s_console;
@@ -101,8 +105,24 @@ void validate_thread_fn(void *p1, void *p2, void *p3)
     LOG_INF("Validate thread ready (%d test vectors)", TEST_VECTOR_COUNT);
 
     while (1) {
-        /* Wait for command byte 'T' (0x54), discard anything else */
+        /* Wait for a known command byte, discard anything else */
         uint8_t cmd = recv_byte();
+        if (cmd == CMD_SYNTH_START) {
+            audio_capture_set_enabled(true);
+            send_byte(CONTROL_MAGIC);
+            send_byte(CMD_SYNTH_START);
+            send_byte(1);
+            LOG_INF("Dashboard command: start synthetic injection");
+            continue;
+        }
+        if (cmd == CMD_SYNTH_PAUSE) {
+            audio_capture_set_enabled(false);
+            send_byte(CONTROL_MAGIC);
+            send_byte(CMD_SYNTH_PAUSE);
+            send_byte(0);
+            LOG_INF("Dashboard command: pause synthetic injection");
+            continue;
+        }
         if (cmd != CMD_TEST_VECTOR) {
             continue;
         }

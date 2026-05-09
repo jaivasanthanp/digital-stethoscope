@@ -1,5 +1,6 @@
 # Zephyr build directories
 build_stm32/
+build_stm32_synth/
 build_ble/
 
 # Python cache
