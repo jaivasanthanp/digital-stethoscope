@@ -27,10 +27,48 @@ static const struct bt_data ad[] = {
 
 static struct bt_conn *current_conn;
 
+/* Advertising-restart work.
+ *
+ * Calling bt_le_adv_start() directly inside the disconnected callback can
+ * race with the controller still tearing down the previous connection and
+ * fail with -EALREADY / -ENOMEM / -EINVAL — after which the peripheral
+ * stops being discoverable until the next reboot. Schedule via the system
+ * work queue, with a short initial delay and a retry-on-failure loop, so
+ * the peripheral is back on the air within ~100 ms of any disconnect.
+ */
+static struct k_work_delayable adv_work;
+
+static void adv_work_handler(struct k_work *work)
+{
+    ARG_UNUSED(work);
+
+    if (current_conn != NULL) {
+        /* Already reconnected since the work was scheduled — nothing to do. */
+        return;
+    }
+
+    int err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
+    if (err == 0) {
+        LOG_INF("Advertising restarted");
+        return;
+    }
+    if (err == -EALREADY) {
+        /* Already advertising — fine. */
+        return;
+    }
+
+    /* Transient failure (typically -ENOMEM while the stack drains the old
+     * connection context). Try again in a moment. */
+    LOG_WRN("Advertising start failed (err %d), retrying in 500 ms", err);
+    k_work_schedule(&adv_work, K_MSEC(500));
+}
+
 static void connected(struct bt_conn *conn, uint8_t err)
 {
     if (err) {
         LOG_ERR("Connection failed: %u", err);
+        /* Make sure we are back advertising even after a failed pairing. */
+        k_work_schedule(&adv_work, K_MSEC(100));
         return;
     }
     current_conn = bt_conn_ref(conn);
@@ -44,8 +82,9 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
         bt_conn_unref(current_conn);
         current_conn = NULL;
     }
-    /* Restart advertising */
-    bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
+    /* Schedule restart after a short delay so the controller has time to
+     * release the connection slot. The work handler retries on failure. */
+    k_work_schedule(&adv_work, K_MSEC(100));
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -102,6 +141,8 @@ int main(void)
 {
     LOG_INF("=== HeartSound BLE Peripheral ===");
 
+    k_work_init_delayable(&adv_work, adv_work_handler);
+
     /* Init UART */
     uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart1));
     if (device_is_ready(uart_dev)) {
@@ -122,11 +163,10 @@ int main(void)
     hsc_service_init();
     audio_input_service_init(uart_dev);
 
-    err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
-    if (err) {
-        LOG_ERR("Advertising start failed: %d", err);
-        return err;
-    }
+    /* Start advertising through the same work handler used after a
+     * disconnect — keeps one code path responsible for the adv lifecycle
+     * and makes initial startup auto-retry too. */
+    k_work_schedule(&adv_work, K_NO_WAIT);
 
     LOG_INF("Advertising as 'HeartSound' — connect with nRF Connect app");
     return 0;
