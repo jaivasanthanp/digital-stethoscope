@@ -208,6 +208,8 @@ def main():
     parser.add_argument("--data-dir",     default="ml/data_circor")
     parser.add_argument("--n-per-class",  type=int, default=3,
                         help="Test vectors per class (10 total for 4 classes with overlap)")
+    parser.add_argument("--arch", choices=["resnet10", "resnet18"], default="resnet10",
+                        help="Which trained model variant to export.")
     args = parser.parse_args()
 
     data_root   = Path(args.data_dir)
@@ -216,7 +218,7 @@ def main():
     app_dsp_dir = Path("app/src/dsp")
     app_ml_dir  = Path("app/src/ml")
 
-    tflite_path    = model_dir / "resnet10_int8.tflite"
+    tflite_path    = model_dir / f"{args.arch}_int8.tflite"
     norm_path      = data_root / "normalization_params.npy"
 
     if not tflite_path.exists():

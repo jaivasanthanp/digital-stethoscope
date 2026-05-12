@@ -28,9 +28,13 @@ LOG_MODULE_REGISTER(inference, LOG_LEVEL_INF);
 K_MUTEX_DEFINE(g_inference_mutex);
 
 /* ── Tensor arena ───────────────────────────────────────────────────────── */
-/* 40 KB. Measured arena_used_bytes = 29332 on first boot; 40 KB gives ~36% */
-/* headroom for minor model updates without overflow.                         */
-static uint8_t tensor_arena[40 * 1024] __attribute__((aligned(16)));
+/* Sized for the bigger ResNet-18 deployment (~700 K INT8 params). The
+ * ResNet-10 baseline measured arena_used_bytes = 29332; ResNet-18 with
+ * 32-channel stem and 128-channel head should land in the 80-130 KB range.
+ * 200 KB leaves comfortable headroom on STM32U575's 768 KB SRAM, and the
+ * arena_used_bytes log line on boot can be used to tighten this later.
+ */
+static uint8_t tensor_arena[200 * 1024] __attribute__((aligned(16)));
 
 /* ── TFLite Micro state ─────────────────────────────────────────────────── */
 static const tflite::Model       *s_model      = nullptr;

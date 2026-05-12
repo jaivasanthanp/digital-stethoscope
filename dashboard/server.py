@@ -390,6 +390,7 @@ HTML = r"""<!doctype html>
       <div class="tabs">
         <button id="customTab" class="tab active" type="button">Custom Upload</button>
         <button id="loopTab" class="tab" type="button">Generic Loop</button>
+        <button id="liveTab" class="tab" type="button">Live Mic</button>
       </div>
       <div id="uartStatus" class="uart-pill">COM Disconnected</div>
     </div>
@@ -437,6 +438,21 @@ HTML = r"""<!doctype html>
         <button id="startLoopBtn" class="primary" type="button">Start Loop</button>
         <button id="stopLoopBtn" class="secondary" type="button" disabled>Stop</button>
       </div>
+    </section>
+
+    <section id="livePanel" class="hidden">
+      <div class="label">Live Laptop Microphone</div>
+      <div class="controls">
+        <label class="field">Serial port
+          <select id="liveSerialPort"></select>
+        </label>
+        <label class="field">Baud
+          <input id="liveBaud" type="number" value="115200" min="9600" step="1">
+        </label>
+        <button id="liveStartBtn" class="primary" type="button">Start Listening</button>
+        <button id="liveStopBtn" class="secondary" type="button" disabled>Stop</button>
+      </div>
+      <div id="liveStatus" class="small" style="margin-top:8px;color:#1f4e79;">Idle. Click <b>Start Listening</b> to capture from your default mic. Each 2-second window is downsampled to 4 kHz and sent to the STM32 for on-chip DSP + inference.</div>
     </section>
 
     <section>
@@ -588,11 +604,12 @@ HTML = r"""<!doctype html>
     }
 
     function setMode(mode) {
-      const custom = mode === "custom";
-      $("customTab").classList.toggle("active", custom);
-      $("loopTab").classList.toggle("active", !custom);
-      $("customPanel").classList.toggle("hidden", !custom);
-      $("loopPanel").classList.toggle("hidden", custom);
+      $("customTab").classList.toggle("active", mode === "custom");
+      $("loopTab").classList.toggle("active", mode === "loop");
+      $("liveTab").classList.toggle("active", mode === "live");
+      $("customPanel").classList.toggle("hidden", mode !== "custom");
+      $("loopPanel").classList.toggle("hidden", mode !== "loop");
+      $("livePanel").classList.toggle("hidden", mode !== "live");
     }
 
     function fmtMs(v) {
@@ -943,7 +960,7 @@ HTML = r"""<!doctype html>
     async function loadPorts() {
       const response = await fetch("/api/ports");
       const data = await response.json();
-      for (const sel of [$("serialPort"), $("loopSerialPort")]) {
+      for (const sel of [$("serialPort"), $("loopSerialPort"), $("liveSerialPort")]) {
         sel.innerHTML = "";
         const ports = data.ports.length ? data.ports : [data.default_port];
         for (const p of ports) {
@@ -1024,6 +1041,167 @@ HTML = r"""<!doctype html>
 
     $("customTab").addEventListener("click", () => setMode("custom"));
     $("loopTab").addEventListener("click", () => setMode("loop"));
+    $("liveTab").addEventListener("click", () => setMode("live"));
+
+    // ───────────── Live mic capture (Web Audio API) ─────────────
+    const LIVE_TARGET_SR = 4000;
+    let liveRunning = false;
+    let liveAudioContext = null;
+    let liveStream = null;
+    let liveProcessor = null;
+    let liveBufferChunks = [];
+    let liveBufferSamples = 0;
+    let liveWindowsSent = 0;
+    let liveBusy = false;
+    let livePending = null;
+
+    function downsampleLinear(input, srIn, srOut) {
+      if (srIn === srOut) return input;
+      const ratio = srIn / srOut;
+      const outLen = Math.floor(input.length / ratio);
+      const out = new Float32Array(outLen);
+      for (let i = 0; i < outLen; i++) {
+        const srcIdx = i * ratio;
+        const i0 = Math.floor(srcIdx);
+        const i1 = Math.min(i0 + 1, input.length - 1);
+        const frac = srcIdx - i0;
+        out[i] = input[i0] * (1 - frac) + input[i1] * frac;
+      }
+      return out;
+    }
+
+    function floatToInt16(input) {
+      const out = new Int16Array(input.length);
+      for (let i = 0; i < input.length; i++) {
+        const s = Math.max(-1, Math.min(1, input[i]));
+        out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+      }
+      return out;
+    }
+
+    function buildWavBlob(int16, sampleRate) {
+      const dataLen = int16.length * 2;
+      const buf = new ArrayBuffer(44 + dataLen);
+      const v = new DataView(buf);
+      let p = 0;
+      const w = (s) => { for (let i = 0; i < s.length; i++) v.setUint8(p++, s.charCodeAt(i)); };
+      const w32 = (n) => { v.setUint32(p, n, true); p += 4; };
+      const w16 = (n) => { v.setUint16(p, n, true); p += 2; };
+      w("RIFF"); w32(36 + dataLen); w("WAVE");
+      w("fmt "); w32(16); w16(1); w16(1); w32(sampleRate);
+      w32(sampleRate * 2); w16(2); w16(16);
+      w("data"); w32(dataLen);
+      for (let i = 0; i < int16.length; i++) v.setInt16(44 + i * 2, int16[i], true);
+      return new Blob([buf], { type: "audio/wav" });
+    }
+
+    async function sendLiveWindow(wavBlob, windowIdx) {
+      if (liveBusy) { livePending = wavBlob; return; }
+      liveBusy = true;
+      const port = $("liveSerialPort").value || $("serialPort").value || "";
+      const baud = $("liveBaud").value || "115200";
+      $("liveStatus").innerHTML = `Sending window <b>${windowIdx}</b> (${(wavBlob.size/1024).toFixed(1)} KB)…`;
+      const fd = new FormData();
+      fd.append("port", port);
+      fd.append("baud", baud);
+      fd.append("file", wavBlob, `live_${windowIdx}.wav`);
+      try {
+        await classifyFormData(fd);
+        $("liveStatus").innerHTML = `Window <b>${windowIdx}</b> classified. Listening for next 2 s…`;
+      } catch (e) {
+        log(`Live classify error: ${e.message}`, true);
+        $("liveStatus").textContent = `Error on window ${windowIdx}: ${e.message}`;
+      } finally {
+        liveBusy = false;
+        if (livePending && liveRunning) {
+          const next = livePending; livePending = null;
+          sendLiveWindow(next, liveWindowsSent++);
+        }
+      }
+    }
+
+    async function startLiveMic() {
+      try {
+        liveStream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+          video: false,
+        });
+        liveAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const source = liveAudioContext.createMediaStreamSource(liveStream);
+        const bufSize = 4096;
+        liveProcessor = liveAudioContext.createScriptProcessor(bufSize, 1, 1);
+        const nativeSR = liveAudioContext.sampleRate;
+        const windowSamples = Math.round(nativeSR * 2.0);
+        liveBufferChunks = [];
+        liveBufferSamples = 0;
+        liveWindowsSent = 0;
+        liveRunning = true;
+
+        liveProcessor.onaudioprocess = (e) => {
+          if (!liveRunning) return;
+          const chan = e.inputBuffer.getChannelData(0);
+          const copy = new Float32Array(chan.length);
+          copy.set(chan);
+          liveBufferChunks.push(copy);
+          liveBufferSamples += chan.length;
+          while (liveBufferSamples >= windowSamples) {
+            const merged = new Float32Array(windowSamples);
+            let pos = 0;
+            while (pos < windowSamples && liveBufferChunks.length > 0) {
+              const chunk = liveBufferChunks[0];
+              const remaining = windowSamples - pos;
+              if (chunk.length <= remaining) {
+                merged.set(chunk, pos);
+                pos += chunk.length;
+                liveBufferChunks.shift();
+              } else {
+                merged.set(chunk.subarray(0, remaining), pos);
+                liveBufferChunks[0] = chunk.subarray(remaining);
+                pos += remaining;
+              }
+            }
+            liveBufferSamples -= windowSamples;
+            const ds = downsampleLinear(merged, nativeSR, LIVE_TARGET_SR);
+            const i16 = floatToInt16(ds);
+            const wav = buildWavBlob(i16, LIVE_TARGET_SR);
+            sendLiveWindow(wav, liveWindowsSent++);
+          }
+        };
+
+        source.connect(liveProcessor);
+        // ScriptProcessor requires a downstream connection to actually run.
+        // Route to a muted gain so we don't echo the mic back through speakers.
+        const muted = liveAudioContext.createGain();
+        muted.gain.value = 0.0;
+        liveProcessor.connect(muted);
+        muted.connect(liveAudioContext.destination);
+
+        $("liveStartBtn").disabled = true;
+        $("liveStopBtn").disabled = false;
+        $("liveStatus").innerHTML = `Listening at native <b>${nativeSR} Hz</b>, downsampling to ${LIVE_TARGET_SR} Hz, 2-second windows…`;
+        log(`Live mic started: native ${nativeSR} Hz -> ${LIVE_TARGET_SR} Hz`);
+      } catch (e) {
+        log(`Mic permission denied or error: ${e.message}`, true);
+        stopLiveMic();
+      }
+    }
+
+    function stopLiveMic() {
+      liveRunning = false;
+      livePending = null;
+      try { if (liveProcessor) liveProcessor.disconnect(); } catch (e) {}
+      try { if (liveAudioContext) liveAudioContext.close(); } catch (e) {}
+      if (liveStream) liveStream.getTracks().forEach(t => t.stop());
+      liveProcessor = null;
+      liveAudioContext = null;
+      liveStream = null;
+      $("liveStartBtn").disabled = false;
+      $("liveStopBtn").disabled = true;
+      $("liveStatus").textContent = `Stopped. ${liveWindowsSent} window(s) classified this session.`;
+    }
+
+    $("liveStartBtn").addEventListener("click", startLiveMic);
+    $("liveStopBtn").addEventListener("click", stopLiveMic);
 
     $("startLoopBtn").addEventListener("click", () => {
       loopNext = Number($("genericSource").value || 0);
@@ -1090,6 +1268,7 @@ HTML = r"""<!doctype html>
     loadPorts().catch(() => {
       $("serialPort").innerHTML = '<option value="COM6">COM6</option>';
       $("loopSerialPort").innerHTML = '<option value="COM6">COM6</option>';
+      $("liveSerialPort").innerHTML = '<option value="COM6">COM6</option>';
       $("uartStatus").className = "uart-pill disconnected";
       $("uartStatus").textContent = "COM Disconnected";
     });

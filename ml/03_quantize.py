@@ -76,7 +76,9 @@ def _res_block(x, out_ch, stride=1, use_se=True, name=""):
 
 
 def build_resnet10(use_se=True):
-    """Input: (batch, 64, 64, 1)  ->  Output: (batch, 4) softmax."""
+    """Input: (batch, 64, 64, 1)  ->  Output: (batch, 3) softmax.
+    ~81K params float32, ~102 KB INT8. The deployed baseline.
+    """
     inp = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 1), name="input")
     x   = tf.keras.layers.Conv2D(16, 7, strides=2, padding='same',
                                   use_bias=False, name="stem_conv")(inp)
@@ -89,6 +91,43 @@ def build_resnet10(use_se=True):
     x   = tf.keras.layers.GlobalAveragePooling2D(name="gap")(x)
     out = tf.keras.layers.Dense(N_CLASSES, activation='softmax', name="fc")(x)
     return tf.keras.Model(inputs=inp, outputs=out, name="resnet10")
+
+
+def build_resnet18(use_se=True):
+    """Wider, deeper variant — 3 stages with 2 ResBlocks each (6 total).
+    Same spatial schedule as ResNet-10 (so 4x4 feature maps before GAP),
+    but doubled depth and widened channel counts.
+
+    Roughly ~700K params float32 -> ~200 KB INT8. Designed to fit
+    comfortably in the STM32 flash headroom (~1.45 MB free) while keeping
+    inference around 250-400 ms.
+    """
+    inp = tf.keras.Input(shape=(IMG_SIZE, IMG_SIZE, 1), name="input")
+    x   = tf.keras.layers.Conv2D(32, 7, strides=2, padding='same',
+                                  use_bias=False, name="stem_conv")(inp)
+    x   = tf.keras.layers.BatchNormalization(name="stem_bn")(x)
+    x   = tf.keras.layers.ReLU(name="stem_relu")(x)
+    x   = tf.keras.layers.MaxPool2D(2, strides=2, name="stem_pool")(x)
+    # Stage 1: 32 ch, 16x16
+    x   = _res_block(x, 32,  stride=1, use_se=use_se, name="rb1a")
+    x   = _res_block(x, 32,  stride=1, use_se=use_se, name="rb1b")
+    # Stage 2: 64 ch, 8x8
+    x   = _res_block(x, 64,  stride=2, use_se=use_se, name="rb2a")
+    x   = _res_block(x, 64,  stride=1, use_se=use_se, name="rb2b")
+    # Stage 3: 128 ch, 4x4
+    x   = _res_block(x, 128, stride=2, use_se=use_se, name="rb3a")
+    x   = _res_block(x, 128, stride=1, use_se=use_se, name="rb3b")
+    x   = tf.keras.layers.GlobalAveragePooling2D(name="gap")(x)
+    out = tf.keras.layers.Dense(N_CLASSES, activation='softmax', name="fc")(x)
+    return tf.keras.Model(inputs=inp, outputs=out, name="resnet18")
+
+
+def build_model(arch: str, use_se: bool = True):
+    if arch == "resnet10":
+        return build_resnet10(use_se=use_se)
+    if arch == "resnet18":
+        return build_resnet18(use_se=use_se)
+    raise ValueError(f"Unknown arch '{arch}'. Use resnet10 or resnet18.")
 
 
 # ── Data helpers ──────────────────────────────────────────────────────────────
@@ -230,8 +269,13 @@ def main():
     parser.add_argument("--no-se",       action="store_true")
     parser.add_argument("--skip-train",  action="store_true",
                         help="Skip training, load existing SavedModel")
-    parser.add_argument("--saved-model", default="ml/models/resnet10_savedmodel")
+    parser.add_argument("--arch", choices=["resnet10", "resnet18"], default="resnet10",
+                        help="Model architecture. resnet18 is the bigger 4-stage variant.")
+    parser.add_argument("--saved-model", default=None,
+                        help="Path to SavedModel dir (default: ml/models/<arch>_savedmodel)")
     args = parser.parse_args()
+    if args.saved_model is None:
+        args.saved_model = f"ml/models/{args.arch}_savedmodel"
 
     data_root  = Path(args.data_dir)
     processed  = data_root / "processed"
@@ -249,7 +293,7 @@ def main():
         norm_mean, norm_std = 0.0, 1.0
         print("WARNING: normalization_params.npy not found — using mean=0, std=1")
 
-    ckpt_path = model_dir / "keras_best.keras"
+    ckpt_path = model_dir / f"{args.arch}_keras_best.keras"
 
     # ── Build or load model ───────────────────────────────────────────────────
     if args.skip_train and saved_path.exists():
@@ -266,8 +310,8 @@ def main():
         print(f"SavedModel saved -> {saved_path}")
 
     else:
-        print("\n=== Building Keras ResNet-10 ===")
-        keras_model = build_resnet10(use_se=not args.no_se)
+        print(f"\n=== Building Keras {args.arch} ===")
+        keras_model = build_model(args.arch, use_se=not args.no_se)
         keras_model.summary(line_length=90)
         print(f"Total params: {keras_model.count_params():,}")
 
@@ -352,7 +396,7 @@ def main():
     print("\n=== Converting to float32 TFLite ===")
     conv_f32   = tf.lite.TFLiteConverter.from_saved_model(str(saved_path))
     tflite_f32 = conv_f32.convert()
-    f32_path   = model_dir / "resnet10_float32.tflite"
+    f32_path   = model_dir / f"{args.arch}_float32.tflite"
     f32_path.write_bytes(tflite_f32)
     print(f"  {f32_path}  ({len(tflite_f32)/1024:.1f} KB)")
 
@@ -373,7 +417,7 @@ def main():
     conv_int8.inference_output_type = tf.int8
 
     tflite_int8 = conv_int8.convert()
-    int8_path   = model_dir / "resnet10_int8.tflite"
+    int8_path   = model_dir / f"{args.arch}_int8.tflite"
     int8_path.write_bytes(tflite_int8)
     print(f"  {int8_path}  ({len(tflite_int8)/1024:.1f} KB)")
     print(f"  Compression: {len(tflite_f32)/len(tflite_int8):.1f}x vs float32")
