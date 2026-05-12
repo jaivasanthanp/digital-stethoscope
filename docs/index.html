@@ -103,6 +103,11 @@
     <div id="statusRow" class="status" style="margin-top:12px;">
       <span class="dot"></span><span id="statusText">Idle</span>
     </div>
+    <div class="small" style="margin-top:8px;">
+      <strong>BLE is 1-to-1:</strong> if nRF Connect (or any other app)
+      is already connected to <code>HeartSound</code>, this page can't see
+      it — disconnect there first.
+    </div>
   </div>
 
   <div class="card">
@@ -140,6 +145,20 @@
       <code>HeartSound</code> peripheral. Classifications come back as
       ASCII notifications on
       <code>12345678-1234-1234-1234-123456789ABD</code>.</p>
+    </details>
+    <details>
+      <summary>Troubleshooting</summary>
+      <p><strong>Connect dialog spins forever.</strong> Another BLE central
+      is connected to <code>HeartSound</code> — most commonly the nRF
+      Connect app. Disconnect there, then re-open this page's chooser.
+      BLE peripherals can only be paired with one central at a time.</p>
+      <p><strong>"No characteristics matching UUID…"</strong> Android cached
+      an old GATT service definition from a previous flash of the
+      firmware. Fix: in Android <em>Settings → Bluetooth</em>, tap the
+      gear next to <code>HeartSound</code> and choose <em>Forget device</em>.
+      Reload this page and reconnect — service discovery runs fresh.</p>
+      <p><strong>Mic permission was denied.</strong> Reload the page,
+      and when the browser asks for microphone access, allow it.</p>
       <p id="errBox" class="err"></p>
     </details>
   </div>

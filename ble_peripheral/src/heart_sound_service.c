@@ -15,6 +15,7 @@
  */
 
 #include "heart_sound_service.h"
+#include "audio_input_service.h"
 
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/gatt.h>
@@ -27,12 +28,17 @@ LOG_MODULE_REGISTER(hsc_service, LOG_LEVEL_INF);
 #define BT_UUID_HSC_SERVICE_VAL \
     BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x1234, 0x1234, 0x123456789ABCULL)
 
-/* Characteristic UUID: 12345678-1234-1234-1234-123456789ABD */
+/* Classification (notify) characteristic UUID: ...ABD */
 #define BT_UUID_HSC_RESULT_VAL \
     BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x1234, 0x1234, 0x123456789ABDULL)
 
-static struct bt_uuid_128 hsc_service_uuid = BT_UUID_INIT_128(BT_UUID_HSC_SERVICE_VAL);
-static struct bt_uuid_128 hsc_result_uuid  = BT_UUID_INIT_128(BT_UUID_HSC_RESULT_VAL);
+/* Audio-in (write_without_response) characteristic UUID: ...ABE */
+#define BT_UUID_HSC_AUDIO_IN_VAL \
+    BT_UUID_128_ENCODE(0x12345678, 0x1234, 0x1234, 0x1234, 0x123456789ABEULL)
+
+static struct bt_uuid_128 hsc_service_uuid  = BT_UUID_INIT_128(BT_UUID_HSC_SERVICE_VAL);
+static struct bt_uuid_128 hsc_result_uuid   = BT_UUID_INIT_128(BT_UUID_HSC_RESULT_VAL);
+static struct bt_uuid_128 hsc_audio_in_uuid = BT_UUID_INIT_128(BT_UUID_HSC_AUDIO_IN_VAL);
 
 /* Notification subscriber tracking */
 static struct bt_gatt_indicate_params indicate_params;
@@ -44,19 +50,32 @@ static void hsc_ccc_changed(const struct bt_gatt_attr *attr, uint16_t value)
     LOG_INF("HSC notifications %s", notify_enabled ? "enabled" : "disabled");
 }
 
-/* GATT service definition */
+/* Single GATT service that holds BOTH characteristics. Web Bluetooth's
+ * service.getCharacteristic() only searches the one primary service handle
+ * returned by getPrimaryService(uuid) — splitting the service across two
+ * BT_GATT_SERVICE_DEFINE blocks made the audio-in characteristic invisible
+ * to Web Bluetooth clients. Keep everything inside this one declaration.
+ */
 BT_GATT_SERVICE_DEFINE(hsc_svc,
     BT_GATT_PRIMARY_SERVICE(&hsc_service_uuid),
 
+    /* Classification notify characteristic - existing behavior. */
     BT_GATT_CHARACTERISTIC(&hsc_result_uuid.uuid,
                            BT_GATT_CHRC_NOTIFY,
                            BT_GATT_PERM_NONE,
                            NULL, NULL, NULL),
-
     BT_GATT_CUD("Heart Sound Classification", BT_GATT_PERM_READ),
-
     BT_GATT_CCC(hsc_ccc_changed,
                 BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
+
+    /* Audio-in write characteristic - new phone-as-mic streaming path.
+     * Handler implementation lives in audio_input_service.c. */
+    BT_GATT_CHARACTERISTIC(&hsc_audio_in_uuid.uuid,
+                           BT_GATT_CHRC_WRITE | BT_GATT_CHRC_WRITE_WITHOUT_RESP,
+                           BT_GATT_PERM_WRITE,
+                           NULL, audio_input_write, NULL),
+    BT_GATT_CUD("Audio In (4 kHz int16 mono, 16 KB / 2 s window)",
+                BT_GATT_PERM_READ),
 );
 
 /* -------------------------------------------------------------------------
