@@ -37,6 +37,25 @@ void inference_init(void);
  */
 int inference_run(const float *spec_in, size_t n_elements, uint8_t *confidence);
 
+/*
+ * Extended inference variant for the dashboard upload protocol.
+ *
+ * spec_in        : float32[64*64] row-major, normalized to zero-mean unit-var
+ * n_elements     : must be 64*64 = 4096
+ * confidence     : output — confidence of returned (post-gate) class, 0–100
+ * raw_probs      : output[3] — raw dequantized model probabilities as rounded
+ *                  percentages, in class order {Absent, Present, Unknown},
+ *                  BEFORE the validation-calibrated unknown gate is applied.
+ *                  Allows the dashboard to display the unfiltered model view.
+ * gate_applied   : output (may be NULL) — 1 if the unknown gate overrode the
+ *                  argmax class, 0 otherwise.
+ *
+ * Returns the same gated class_id as inference_run().
+ */
+int inference_run_probs(const float *spec_in, size_t n_elements,
+                        uint8_t *confidence, uint8_t raw_probs[3],
+                        uint8_t *gate_applied);
+
 #ifdef __cplusplus
 }
 #endif

@@ -121,8 +121,9 @@ extern "C" void inference_init(void)
             s_output->type);
 }
 
-extern "C" int inference_run(const float *spec_in, size_t n_elements,
-                              uint8_t *confidence)
+static int run_inference_core(const float *spec_in, size_t n_elements,
+                              uint8_t *confidence, uint8_t raw_probs[3],
+                              uint8_t *gate_applied)
 {
     if (!s_interpreter || !s_input || !s_output) {
         LOG_ERR("Inference not initialized");
@@ -152,6 +153,7 @@ extern "C" int inference_run(const float *spec_in, size_t n_elements,
     const int8_t *out_data = s_output->data.int8;
 
     int   best_class   = 0;
+    int   raw_argmax   = 0;
     float best_prob    = -1.0f;
     float second_prob  = -1.0f;
     float unknown_prob = 0.0f;
@@ -159,10 +161,19 @@ extern "C" int inference_run(const float *spec_in, size_t n_elements,
     const int n_classes = s_output->dims->data[1];
     for (int c = 0; c < n_classes; c++) {
         float prob = (out_data[c] - out_zp) * out_scale;
+
+        if (raw_probs != nullptr && c < 3) {
+            float pct = prob * 100.0f + 0.5f;
+            if (pct < 0.0f) pct = 0.0f;
+            if (pct > 100.0f) pct = 100.0f;
+            raw_probs[c] = (uint8_t)pct;
+        }
+
         if (prob > best_prob) {
             second_prob = best_prob;
             best_prob  = prob;
             best_class = c;
+            raw_argmax = c;
         } else if (prob > second_prob) {
             second_prob = prob;
         }
@@ -173,14 +184,41 @@ extern "C" int inference_run(const float *spec_in, size_t n_elements,
     }
 
     const float margin = best_prob - second_prob;
+    uint8_t gated = 0;
     if (n_classes > UNKNOWN_CLASS_ID &&
         best_class != UNKNOWN_CLASS_ID &&
         unknown_prob >= UNKNOWN_MIN_PROB &&
         (best_prob <= UNKNOWN_TOP_MAX || margin <= UNKNOWN_MARGIN_MAX)) {
         best_class = UNKNOWN_CLASS_ID;
         best_prob = unknown_prob;
+        gated = 1;
     }
 
+    if (gate_applied != nullptr) {
+        *gate_applied = gated;
+    }
+
+    /* Backfill any unfilled raw_probs slots when model has < 3 outputs. */
+    if (raw_probs != nullptr) {
+        for (int c = n_classes; c < 3; c++) {
+            raw_probs[c] = 0;
+        }
+    }
+
+    (void)raw_argmax;
     *confidence = (uint8_t)(best_prob * 100.0f + 0.5f);
     return best_class;
+}
+
+extern "C" int inference_run(const float *spec_in, size_t n_elements,
+                              uint8_t *confidence)
+{
+    return run_inference_core(spec_in, n_elements, confidence, nullptr, nullptr);
+}
+
+extern "C" int inference_run_probs(const float *spec_in, size_t n_elements,
+                                    uint8_t *confidence, uint8_t raw_probs[3],
+                                    uint8_t *gate_applied)
+{
+    return run_inference_core(spec_in, n_elements, confidence, raw_probs, gate_applied);
 }

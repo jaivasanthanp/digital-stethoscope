@@ -1,7 +1,8 @@
 /*
  * ble_client.c — UART bridge to nRF52840 BLE peripheral
  *
- * Transmits 6-byte packets at 115200 baud over UART (usart3).
+ * Transmits 6-byte packets at 115200 baud over UART (usart2, PD5 TX
+ * -> NUCLEO D53 -> nRF P0.08 UART1 RX).
  * nRF52840 receives these and forwards them as BLE GATT notifications
  * on the Heart Sound Classification characteristic.
  *
@@ -27,10 +28,10 @@ static const struct device *uart_dev;
 
 void ble_client_init(void)
 {
-    uart_dev = DEVICE_DT_GET(DT_NODELABEL(usart3));
+    uart_dev = DEVICE_DT_GET(DT_NODELABEL(usart2));
 
     if (!device_is_ready(uart_dev)) {
-        LOG_WRN("UART (usart3) not ready — BLE bridge disabled");
+        LOG_WRN("UART (usart2) not ready — BLE bridge disabled");
         uart_dev = NULL;
         return;
     }

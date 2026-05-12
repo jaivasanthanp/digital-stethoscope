@@ -83,8 +83,8 @@ static void uart_rx_cb(const struct device *dev, void *user_data)
                                  | ((uint32_t)uart_buf[4] << 8)
                                  | ((uint32_t)uart_buf[5] << 16);
 
-            static const char *names[] = {"Normal", "SysMurmur", "DiaMurmur", "S3Gallop"};
-            const char *name = (class_id < 4) ? names[class_id] : "Unknown";
+            static const char *names[] = {"Absent", "Present", "Unknown"};
+            const char *name = (class_id < ARRAY_SIZE(names)) ? names[class_id] : "Invalid";
             LOG_INF("RX: %s  conf=%u%%  ts=%ums", name, confidence, ts_ms);
 
             if (current_conn) {

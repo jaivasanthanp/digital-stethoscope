@@ -4,15 +4,14 @@
  * Service UUID:        12345678-1234-1234-1234-123456789ABC
  * Characteristic UUID: 12345678-1234-1234-1234-123456789ABD
  *   Properties: NOTIFY
- *   Length: 6 bytes
- *   Format: [class_id:u8, confidence:u8, reserved:u8, timestamp:u24_le]
+ *   Format: short printable ASCII string, e.g. "Present 95%"
+ *   nRF Connect auto-renders ASCII payloads as text in the notification feed.
  *
- * class_id encoding:
- *   0x00 = Normal
- *   0x01 = SystolicMurmur
- *   0x02 = DiastolicMurmur
- *   0x03 = S3Gallop
- *   0xFF = NoResult
+ * class_id encoding (CirCor 2022, 3-class):
+ *   0x00 = Absent
+ *   0x01 = Present
+ *   0x02 = Unknown
+ *   0xFF = Error
  */
 
 #include "heart_sound_service.h"
@@ -20,6 +19,7 @@
 #include <zephyr/bluetooth/bluetooth.h>
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/logging/log.h>
+#include <stdio.h>
 
 LOG_MODULE_REGISTER(hsc_service, LOG_LEVEL_INF);
 
@@ -53,6 +53,8 @@ BT_GATT_SERVICE_DEFINE(hsc_svc,
                            BT_GATT_PERM_NONE,
                            NULL, NULL, NULL),
 
+    BT_GATT_CUD("Heart Sound Classification", BT_GATT_PERM_READ),
+
     BT_GATT_CCC(hsc_ccc_changed,
                 BT_GATT_PERM_READ | BT_GATT_PERM_WRITE),
 );
@@ -69,25 +71,35 @@ int hsc_service_notify(struct bt_conn *conn,
                        uint8_t class_id, uint8_t confidence,
                        uint32_t timestamp_ms)
 {
+    ARG_UNUSED(timestamp_ms);
+
     if (!notify_enabled) {
         return -ENOTCONN;
     }
 
-    uint8_t pkt[6];
-    pkt[0] = class_id;
-    pkt[1] = confidence;
-    pkt[2] = 0x00;
-    pkt[3] = (uint8_t)(timestamp_ms & 0xFF);
-    pkt[4] = (uint8_t)((timestamp_ms >> 8) & 0xFF);
-    pkt[5] = (uint8_t)((timestamp_ms >> 16) & 0xFF);
+    static const char *const class_names[] = {"Absent", "Present", "Unknown"};
+    const char *name = (class_id < ARRAY_SIZE(class_names))
+                           ? class_names[class_id]
+                           : "Error";
 
-    /* Find the characteristic attribute (index 1 in the service table) */
+    /* Printable ASCII payload — e.g. "Present 95%" (no trailing NUL).
+     * nRF Connect renders this as text in the notification log line. */
+    char pkt[20];
+    int len = snprintf(pkt, sizeof(pkt), "%s %u%%", name, confidence);
+    if (len < 0) {
+        return -EINVAL;
+    }
+    if (len > (int)sizeof(pkt)) {
+        len = sizeof(pkt);
+    }
+
+    /* Characteristic value attribute (index 1 in the service table). */
     const struct bt_gatt_attr *attr = &hsc_svc.attrs[1];
 
     struct bt_gatt_notify_params params = {
         .attr = attr,
         .data = pkt,
-        .len  = sizeof(pkt),
+        .len  = (uint16_t)len,
     };
 
     int err = bt_gatt_notify_cb(conn, &params);

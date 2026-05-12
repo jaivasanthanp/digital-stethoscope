@@ -1,0 +1,57 @@
+{
+  "sample_rate": 4000,
+  "window_seconds": 2.0,
+  "n_segments": 6,
+  "class_names": [
+    "Absent",
+    "Present",
+    "Unknown"
+  ],
+  "patient_id": "9979",
+  "source": "PhysioNet/CinC 2022 (CirCor DigiScope)",
+  "patient_note": "Holosystolic murmur, grade III/VI, diamond shape, most audible at TV.",
+  "segments": [
+    {
+      "index": 0,
+      "class_id": 1,
+      "class_name": "Present",
+      "start_seconds": 0.0,
+      "end_seconds": 2.0
+    },
+    {
+      "index": 1,
+      "class_id": 1,
+      "class_name": "Present",
+      "start_seconds": 2.0,
+      "end_seconds": 4.0
+    },
+    {
+      "index": 2,
+      "class_id": 1,
+      "class_name": "Present",
+      "start_seconds": 4.0,
+      "end_seconds": 6.0
+    },
+    {
+      "index": 3,
+      "class_id": 1,
+      "class_name": "Present",
+      "start_seconds": 6.0,
+      "end_seconds": 8.0
+    },
+    {
+      "index": 4,
+      "class_id": 1,
+      "class_name": "Present",
+      "start_seconds": 8.0,
+      "end_seconds": 10.0
+    },
+    {
+      "index": 5,
+      "class_id": 1,
+      "class_name": "Present",
+      "start_seconds": 10.0,
+      "end_seconds": 12.0
+    }
+  ]
+}

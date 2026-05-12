@@ -1,17 +1,44 @@
 # Digital Stethoscope — Edge AI Heart Sound Classifier
 
 > Real-time PCG classification on STM32U575 using TFLite Micro + Zephyr RTOS.
-> No cloud. No proprietary IDEs. Pure embedded ML at 102 ms per inference.
+> No cloud. No proprietary IDEs. Pure embedded ML at ~102 ms inference per window.
 
-A wearable digital stethoscope prototype that currently feeds synthetic PCG strings
-into the STM32U575, computes mel-spectrograms on-device, runs a quantized ResNet-10
-INT8 CNN to classify **Absent / Present / Unknown murmur status**
-in real time, and transmits results over BLE to a phone.
+A wearable digital stethoscope prototype. The **laptop dashboard uploads any
+WAV / 1D audio NPY** to the STM32U575 over UART (`'A'` command, binary
+protocol). The STM32 receives raw 8000-sample 4 kHz PCM, computes the mel
+spectrogram on chip, runs a quantized ResNet-10 INT8 CNN to classify **Absent
+/ Present / Unknown murmur status** (PhysioNet/CinC 2022 CirCor DigiScope
+labels) with a validation-calibrated unknown gate, and returns per-stage
+latency, audio statistics, raw 3-class probabilities, and the full 64×64
+spectrogram in a single response packet. The dashboard renders a scientific
+multi-segment view (probability time-series, segment timeline, per-class
+bars, audio RMS, latency breakdown, mel spectrogram heatmap).
 
-Current hardware note: the ICS-43434 microphone is discontinued for this revision.
-The STM32U575 renders compact synthetic heart-sound strings into 2-second PCM
-windows and runs the DSP + ML pipeline locally. A SAI/I2S microphone source may be
-added later behind the existing audio source API.
+Synthetic PCG strings are still rendered on chip as a self-test demo path
+(`'S'` / `'P'` UART commands) but are not used by the dashboard. The
+ICS-43434 microphone is discontinued for this revision; SAI/I2S microphone
+support can be re-introduced later behind the existing audio source API.
+
+## Live demo files
+
+Three single-class CirCor recordings, trimmed to **12 s / 6 STM32 windows**
+each, ship under `presentation_samples/` with ground-truth JSON sidecars so
+the dashboard auto-fills the accuracy column:
+
+| File | Class | Patient | Note |
+|---|---|---|---|
+| `01_absent_pid49653.wav` | Absent  | 49653 (Adolescent, AV) | Healthy baseline, quiet S1/S2 only |
+| `02_present_pid9979.wav` | Present | 9979 (TV)              | Holosystolic, grade III/VI, diamond shape |
+| `03_unknown_pid9983.wav` | Unknown | 9983 (AV)              | Annotator was unsure - should trigger the unknown gate |
+
+There is also a 9-segment mixed demo at
+`ml/data_circor/demo/mixed_demo.wav` (3 segments per class) for showing the
+timeline view in one upload. Regenerate either set with:
+
+```
+py ml\generate_mixed_demo.py            # mixed multi-class demo
+py presentation_samples\__build__.py    # single-class samples
+```
 
 Built as a final project for the ML course at USST Shanghai (Messtechnik und Sensorik
 exchange, Hochschule Coburg)
@@ -32,34 +59,43 @@ exchange, Hochschule Coburg)
 ## System Architecture
 
 ```
-Synthetic PCG string
-    |  LABEL|start,duration,frequency,amplitude;...
-    |  rendered locally to float32 PCM @ 4000 Hz
+Laptop dashboard (dashboard/server.py)
+    |  HTTP @ 127.0.0.1:8765 - upload .wav / .npy, auto-segment into 2 s windows
+    |  serial @ 115200 baud:
+    |    'A' + 8000 LE int16 PCM samples (per window, 16 KB)
     v
-STM32U575  --  Zephyr RTOS (4 threads, message queues)
+STM32U575  --  Zephyr RTOS (4 threads + validate thread)
     |
-    +-- AudioCaptureThread (prio 2)
-    |       2-second ring buffer, DMA-backed
+    +-- validate_thread (binary UART command handler)
+    |       reads 'A' command, fills s_uploaded_audio[8000]
+    |       computes audio stats (RMS, peak, ZCR) on chip
     |
-    +-- DSPThread (prio 4)
+    +-- mel_spec_compute()    (shared, mutex-protected)
     |       Hann window -> arm_rfft_fast_f32 (CMSIS-DSP)
-    |       -> 64-band mel filterbank -> log10 -> normalize
-    |       Output: float32[64x64] spectrogram
+    |       -> 64-band mel filterbank -> log10 -> per-spec z-norm
+    |       Output: float32[64x64] spectrogram, ~85 ms / window
     |
-    +-- InferenceThread (prio 6)
-    |       TFLite Micro -- ResNet-10 INT8
-    |       CMSIS-NN kernels (Cortex-M33 DSP MACs)
-    |       Output: class_id (0-2) + confidence (0-100%)
+    +-- inference_run_probs() (CirCor 2022 INT8 model + unknown gate)
+    |       TFLite Micro -- ResNet-10 INT8 (CMSIS-NN kernels)
+    |       3 raw probabilities + gate decision, ~102 ms / window
     |
-    +-- CommThread (prio 8)
-            6-byte UART packet -> nRF52840
+    +-- validate_thread (response packet)
+            0xA5 + class + conf + raw probs + gate + dsp_ms + infer_ms
+            + rms + peak + zcr + 4096 LE float32 mel values   (16401 B)
                 |
                 v
-            nRF52840  --  Zephyr BLE GATT
-                |   HSC_Result characteristic (NOTIFY)
-                v
-            Phone / nRF Connect app
+Laptop dashboard
+    |   - per-segment timeline, probability time-series
+    |   - latency breakdown, audio stats, mel heatmap
+    |   - optional ground-truth labels JSON -> accuracy column
+    v
+Browser at http://127.0.0.1:8765
 ```
+
+Synthetic PCG strings (`'S'`/`'P'` UART commands) feed the legacy
+`AudioCaptureThread -> DSPThread -> InferenceThread -> CommThread -> nRF52840`
+pipeline; that path still works for self-test and BLE notify, but is not
+exercised by the dashboard.
 
 ---
 
@@ -219,21 +255,37 @@ digital-stethoscope/
 |       |-- main.c                   <- UART RX -> BLE GATT notify
 |       `-- heart_sound_service.c    <- Custom GATT service (HSC_Result NOTIFY)
 |
-`-- ml/                              <- Python ML pipeline (runs on laptop)
-    |-- requirements.txt
-    |-- 01_preprocess.py             <- PhysioNet download + mel-spectrogram generation
-    |-- 02_train.py                  <- ResNet-10 PyTorch training
-    |-- 03_quantize.py               <- Keras ResNet-10 + TFLite INT8 PTQ
-    |-- 04_export.py                 <- .tflite -> C arrays + normalization header
-    |-- 05_validate_on_device.py     <- Send test vectors over UART, verify results
-    |-- visualize_spectrograms.py    <- Plot 3-class spectrogram grid
-    `-- models/
-        |-- resnet10.py              <- PyTorch ResNet-10 definition
-        |-- dataset.py               <- CirCor dataloader
-        |-- resnet10_int8.tflite     <- Quantized model (102 KB)
-        |-- confusion_matrix.png
-        |-- training_curves.png
-        `-- spectrogram_samples.png
+|-- ml/                              <- Python ML pipeline (runs on laptop)
+|   |-- requirements.txt
+|   |-- 01_preprocess.py             <- PhysioNet download + mel-spectrogram generation
+|   |-- 02_train.py                  <- ResNet-10 PyTorch training
+|   |-- 03_quantize.py               <- Keras ResNet-10 + TFLite INT8 PTQ
+|   |-- 04_export.py                 <- .tflite -> C arrays + normalization header
+|   |-- 05_validate_on_device.py     <- Send test vectors over UART, verify results
+|   |-- visualize_spectrograms.py    <- Plot 3-class spectrogram grid
+|   |-- generate_mixed_demo.py       <- Build mixed-class WAV from CirCor (NEW)
+|   |-- data_circor/                 <- CirCor raw + processed splits (gitignored)
+|   |   `-- demo/
+|   |       |-- mixed_demo.wav             <- 18 s, 9 segments (3 per class)
+|   |       `-- mixed_demo_labels.json
+|   `-- models/
+|       |-- resnet10.py
+|       |-- dataset.py
+|       |-- resnet10_int8.tflite
+|       |-- unknown_gate.json
+|       |-- confusion_matrix.png
+|       |-- training_curves.png
+|       `-- spectrogram_samples.png
+|
+|-- dashboard/
+|   `-- server.py                    <- Browser dashboard + UART upload client
+|
+`-- presentation_samples/            <- Live-demo WAVs (one per class, 12 s each)
+    |-- 01_absent_pid49653.wav  + _labels.json
+    |-- 02_present_pid9979.wav  + _labels.json
+    |-- 03_unknown_pid9983.wav  + _labels.json
+    |-- __build__.py                 <- Idempotent regenerator
+    `-- README.md
 ```
 
 ---
@@ -285,7 +337,35 @@ python ml/02_train.py               # train ResNet-10 (PyTorch)
 python ml/03_quantize.py            # Keras retrain + INT8 PTQ
 python ml/04_export.py              # export C arrays to app/src/ml/
 python ml/05_validate_on_device.py --port COM6   # on-device validation
+
+# Demo audio (optional - regenerates from CirCor labels)
+python ml/generate_mixed_demo.py            # mixed multi-class WAV + labels
+python presentation_samples/__build__.py    # 3 single-class demo WAVs + labels
 ```
+
+### Run the live dashboard
+
+```powershell
+C:\Users\<user>\AppData\Local\Programs\Python\Python311\python.exe dashboard\server.py --port COM6 --baud 115200
+# Open http://127.0.0.1:8765 in any modern browser.
+```
+
+Upload `presentation_samples/02_present_pid9979.wav` for the cleanest live
+demo (all 6 windows classify as Present, ground truth comes from the sidecar
+JSON, accuracy column reads 100%). Upload `ml/data_circor/demo/mixed_demo.wav`
+to demonstrate the full segment timeline and the unknown-gate behaviour on
+borderline windows.
+
+Measured on hardware (NUCLEO-U575ZI-Q @ 160 MHz, 115200 baud UART):
+
+| Stage | Per-window time |
+|---|---|
+| STM32 mel-spectrogram DSP | ~85 ms |
+| STM32 INT8 ResNet-10 inference | ~102 ms |
+| UART upload (16 KB audio host -> STM32) | ~1.4 s |
+| UART return (16 KB spectrogram STM32 -> host) | ~1.4 s |
+
+The UART links dominate total round-trip; on-chip compute is ~190 ms.
 
 ---
 
@@ -293,16 +373,44 @@ python ml/05_validate_on_device.py --port COM6   # on-device validation
 
 **Service UUID:** `12345678-1234-1234-1234-123456789ABC`
 
-**HSC_Result Characteristic** (`...ABD`, NOTIFY, 6 bytes):
+**Heart Sound Classification Characteristic** (`...ABD`, NOTIFY, ≤ 20 bytes):
 
-| Byte | Field | Description |
-|------|-------|-------------|
-| 0 | `class_id` | 0=Absent, 1=Present, 2=Unknown, 0xFF=Error |
-| 1 | `confidence` | 0–100 (%) |
-| 2 | reserved | 0x00 |
-| 3–5 | `timestamp_ms` | uptime milliseconds, little-endian |
+Payload is a short printable ASCII string so any BLE scanner renders it as
+readable text in the live notification feed (no manual hex decoding):
 
-Connect with **nRF Connect** (iOS/Android), subscribe to notifications, observe real-time classifications.
+| Example payload | Meaning |
+|---|---|
+| `Absent 91%`  | class 0, 91% confidence |
+| `Present 95%` | class 1, 95% confidence |
+| `Unknown 14%` | class 2, gate fired |
+| `Error 0%`    | inference returned 0xFF |
+
+The characteristic also exposes a **CUD descriptor** (`0x2901`) reading
+`"Heart Sound Classification"`, so nRF Connect shows that name instead of
+"Unknown Characteristic" in the service browser.
+
+The internal STM32 ↔ nRF UART link still uses the legacy 6-byte binary
+frame `[class_id, confidence, reserved, timestamp_ms u24 LE]`; the ASCII
+conversion happens inside `hsc_service_notify()` on the nRF, right before
+the BLE notify.
+
+### Wiring
+
+| Wire | STM32 NUCLEO-U575ZI-Q | nRF52840 DK |
+|---|---|---|
+| Data | **PD5** — USART2 TX (silkscreen `USART_B_TX` / D53) | **P0.08** — UART1 RX |
+| Ground | any **GND** | any **GND** |
+
+USART3 was originally specced but has no labelled header pin on the
+NUCLEO-U575ZI-Q, so the bridge moved to USART2 on 2026-05-12. A common GND
+wire is required even when both boards share a PC.
+
+### Demo
+
+Connect with **nRF Connect** (iOS/Android), scan for `HeartSound`
+(`CB:1D:2D:72:53:F1` on this build), connect, subscribe to characteristic
+`...ABD`, then upload any WAV from the dashboard. Each 2-second classification
+window emits one notification on the phone, ~3 s apart.
 
 ---
 
@@ -311,11 +419,16 @@ Connect with **nRF Connect** (iOS/Android), subscribe to notifications, observe 
 | Phase | Description | Status |
 |-------|-------------|--------|
 | 0 | Zephyr workspace, 4-thread scaffold, SAI overlay | Done |
-| 1 | ML pipeline — preprocess, train, quantize, export | Done |
+| 1 | ML pipeline — preprocess, train, quantize, export (CirCor 2022) | Done |
 | 2 | TFLite Micro on STM32U575 — flashed, measured | Done |
 | 3 | STFT/Mel DSP chain on U575 — full pipeline running | Done |
-| 4 | Synthetic PCG string input on STM32U575 | Done |
-| 5 | nRF52840 BLE — firmware built, awaiting board | Pending (board arriving Apr 24) |
+| 4 | Synthetic PCG string self-test path | Done |
+| 4b | **Laptop audio upload over UART (`'A'` command)** | **Done — measured on hardware** |
+| 4c | **Browser dashboard with multi-segment scientific charts** | **Done** |
+| 4d | **CirCor demo audio (mixed + presentation samples)** | **Done** |
+| 5  | **nRF52840 BLE — flashed, bridge verified, phone notifications confirmed** | **Done (2026-05-12)** |
+| 5b | **Dashboard-upload classifications fan out to BLE** | **Done (2026-05-12)** |
+| 5c | **Readable ASCII payload + CUD descriptor for live demo** | **Done (2026-05-12)** |
 | 6 | Polish, README, demo video | In progress |
 
 ---

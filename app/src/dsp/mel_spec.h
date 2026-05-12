@@ -3,6 +3,13 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <zephyr/kernel.h>
+
+/*
+ * mel_spec_compute() uses shared static DSP work buffers. Hold this mutex
+ * around any call to mel_spec_compute() that may race with other threads.
+ */
+extern struct k_mutex g_mel_spec_mutex;
 
 /*
  * DSP parameters — must match the Python preprocessing pipeline exactly.

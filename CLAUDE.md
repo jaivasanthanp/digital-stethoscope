@@ -1,18 +1,47 @@
 # CLAUDE.md — AI Digital Stethoscope (PCG Heart Sound Classifier)
 
+> **2026-05-11 update**: input source is now **laptop audio upload over UART**,
+> not synthetic strings. The STM32 receives raw 8000-sample PCM from the host,
+> computes the mel spectrogram on chip, runs the CirCor 2022 INT8 ResNet-10 +
+> calibrated unknown gate, and returns class + raw probabilities + per-stage
+> latency + audio stats + the full 64x64 spectrogram to the dashboard for
+> rendering. Synthetic injection is retained only as a self-test demo command.
+> See the **Session Log — 2026-05-11** section at the bottom of this file for
+> the full set of changes, the new UART protocol, and measured hardware
+> results.
+>
+> **2026-05-12 update**: nRF52840 DK BLE peripheral is now wired, flashed, and
+> verified end-to-end. STM32 ↔ nRF UART bridge moved from USART3 to **USART2
+> (PD5 / NUCLEO D53)** because USART3 has no labelled header pin on the
+> NUCLEO-U575ZI-Q. The dashboard-upload (`'A'`) inference path now also calls
+> `ble_client_send()`, so every WAV uploaded to the dashboard fans out to the
+> phone over BLE. The BLE characteristic payload was changed from a 6-byte
+> binary packet to a short printable ASCII string (e.g. `"Present 95%"`) so
+> nRF Connect renders each notification as readable text, and the
+> characteristic now advertises a User Description ("Heart Sound
+> Classification"). See **Session Log — 2026-05-12** at the bottom.
+
 ## Project Identity
 
-**What this is:** A wearable digital stethoscope prototype that currently uses synthetic
-PCG strings as the input source on the STM32U575, computes mel-spectrograms on-device,
-runs a quantized ResNet-10 INT8 CNN to classify Normal / Systolic Murmur / Diastolic
-Murmur / S3 Gallop in real time, and transmits results over BLE to a phone. No cloud.
-No CubeIDE. Pure Zephyr RTOS on both MCUs.
+**What this is:** A wearable digital stethoscope prototype. The STM32U575
+accepts 2-second 4 kHz PCM windows over UART, computes the mel spectrogram on
+chip, runs a quantized ResNet-10 INT8 CNN to classify **Absent / Present /
+Unknown** murmur status (PhysioNet/CinC 2022 CirCor DigiScope labels), and
+transmits results to a phone over BLE — or to the local dashboard for richer
+scientific visualisation. No cloud. No CubeIDE. Pure Zephyr RTOS on both MCUs.
 
-**Current input-source decision (May 2026):** ICS-43434 is discontinued for this
-revision and is not part of the active firmware path. The STM32U575 locally renders
-compact synthetic heart-sound strings into 2-second PCM windows, then runs the same
-DSP + TFLite Micro inference chain locally. SAI/I2S microphone support may be added
-later behind `audio_capture_init()` / `audio_capture_get_window()`.
+**Input-source decisions:**
+
+- *Active path (May 2026)*: the laptop dashboard reads any uploaded WAV / 1D
+  audio NPY, resamples to 4 kHz mono, splits long files into successive
+  2-second windows, and streams each window as int16 PCM to the STM32 via the
+  `'A'` UART command. The STM32 owns the full DSP + ML chain on chip.
+- *Self-test path*: a synthetic PCG-string source still exists in
+  `i2s_capture.c` and can be toggled with the `'S'` / `'P'` UART commands.
+  Not used by the current dashboard.
+- *Future hardware path*: the ICS-43434 MEMS microphone is discontinued for
+  this revision. A SAI/I2S microphone source can be re-introduced later behind
+  the existing `audio_capture_init()` / `audio_capture_get_window()` API.
 
 **Why it exists:** Final exam project for ML course at USST Shanghai (Messtechnik und Sensorik
 exchange semester). Also a portfolio piece targeting German medtech embedded internships
@@ -332,16 +361,21 @@ CONFIG_UART_INTERRUPT_DRIVEN=y
     dma-names = "rx";   /* required — base DTSI has dmas but not dma-names */
 };
 
-/* USART3 — bridge to nRF52840 at 115200 baud */
-&usart3 {
+/* USART2 — bridge to nRF52840 at 115200 baud (PD5 TX / D53 → nRF P0.08) */
+&usart2 {
     status = "okay";
-    pinctrl-0 = <&usart3_tx_pd8 &usart3_rx_pd9>;
+    pinctrl-0 = <&usart2_tx_pd5 &usart2_rx_pd6>;
     pinctrl-names = "default";
     current-speed = <115200>;
 };
 ```
 
-ICS-43434 wiring: BCLK→PB3, LRCLK→PB6, DOUT→PB5, VDD→3.3V, L/R→GND (left ch).
+nRF52840 DK wiring (two wires only):
+- STM32 PD5 (USART2 TX, NUCLEO D53 / silkscreen `USART_B_TX`) → nRF P0.08 (UART1 RX)
+- STM32 GND ↔ nRF GND (common ground)
+
+ICS-43434 wiring (future microphone path): BCLK→PB3, LRCLK→PB6, DOUT→PB5,
+VDD→3.3V, L/R→GND (left ch).
 
 ### Tensor Arena Sizing
 
@@ -384,18 +418,24 @@ timer. This lets you test the full DSP+inference pipeline on real hardware witho
 
 ## BLE GATT Service Definition
 
-**Service UUID:** `12345678-1234-1234-1234-123456789ABC` (custom, use for prototype)
+**Service UUID:** `12345678-1234-1234-1234-123456789ABC` (custom, prototype)
 
-**Characteristic: HSC_Result**
+**Characteristic: Heart Sound Classification**
 - UUID: `12345678-1234-1234-1234-123456789ABD`
 - Properties: NOTIFY
-- Length: 6 bytes
-- Format: `[class_id: u8, confidence: u8, reserved: u8, timestamp: u32 little-endian]`
+- User Description (CUD): `"Heart Sound Classification"`
+- Payload: printable ASCII string, ≤ 20 bytes, e.g. `"Present 95%"`,
+  `"Absent 91%"`, `"Unknown 14%"`, `"Error 0%"` (class 0xFF).
 
-class_id encoding: 0=Normal, 1=SystolicMurmur, 2=DiastolicMurmur, 3=S3Gallop, 0xFF=NoResult
+Format chosen so nRF Connect auto-detects the bytes as text and renders each
+notification as a readable string in the live feed (no manual hex decoding).
 
 For demo: pair with nRF Connect app (iOS/Android), subscribe to notifications,
-observe classification results in real time. No custom app needed for exam demo.
+observe classification results in real time as the dashboard uploads WAVs.
+No custom app needed for exam demo. The internal STM32 ↔ nRF UART link still
+uses the legacy 6-byte binary frame `[class_id, confidence, reserved,
+timestamp_ms u24 LE]` — the ASCII conversion happens in `hsc_service_notify()`
+on the nRF before the BLE notify.
 
 ---
 
@@ -555,19 +595,35 @@ much higher confidence values matching training distribution.
 - [ ] Connect real stethoscope chestpiece to mic (silicone coupler or tape)
 - [ ] Full pipeline end-to-end: real heartbeat → classification → UART
 
-### Phase 5 — nRF52840 BLE (Apr 24+, board arriving)
+### Phase 5 — nRF52840 BLE ✅ COMPLETE (2026-05-12)
 
 - [x] Write `ble_peripheral/src/heart_sound_service.c`: custom GATT service (HSC_Result NOTIFY)
 - [x] Write `ble_peripheral/src/main.c`: UART RX → BLE GATT notify
-- [x] **Build nRF app** (compile-validated, Apr 17, board not yet in hand):
-      `west build --board nrf52840dk/nrf52840 --build-dir build_ble ble_peripheral`
-      Result: FLASH 122 KB / 1 MB (12%), RAM 23 KB / 256 KB (9%) — zero warnings
+- [x] **Build nRF app**: `west build --board nrf52840dk/nrf52840 --build-dir build_ble ble_peripheral`
+      Result: FLASH 122 KB / 1 MB (11.65%), RAM 22.5 KB / 256 KB (8.60%)
       Fixes vs original scaffold: `BT_LE_ADV_CONN` → `BT_LE_ADV_CONN_FAST_1` (Zephyr 4.4 API),
       `BT_DEVICE_APPEARANCE` inline comment removed, `BT_GATT_CACHING=y` added as dependency,
       overlay pinctrl-1 sleep state added (nRF52840 requires both default+sleep states).
-      Flash command (when board arrives): `west flash --build-dir build_ble`
-- [ ] UART bridge: STM32 CommThread → nRF UART1 RX (P0.08) → BLE GATT notify
-- [ ] Test with nRF Connect app: subscribe to HSC_Result, observe notifications
+- [x] **Flash to hardware** (`west flash --build-dir build_ble --runner jlink`):
+      the default `nrfutil` runner is broken on Python 3.14 (`ModuleNotFoundError: constants`).
+      Use `--runner jlink` instead — the DK's onboard J-Link is detected as SEGGER 1366:1051.
+- [x] **UART bridge over USART2** (PD5 TX / NUCLEO D53 → nRF P0.08 UART1 RX, + GND):
+      USART3 was originally specced, but the NUCLEO-U575ZI-Q has no labelled USART3
+      pin on the Arduino-style morpho header. Migrated to USART2 instead. PD5 is
+      labelled `USART_B_TX` / D53 on the silkscreen.
+- [x] **Cross-board verified**: synthetic-loop `'S'` produced 6 packets in 12 s, all
+      decoded correctly on nRF side as `RX: <Absent|Present|Unknown> conf=NN% ts=...ms`.
+- [x] **Dashboard upload path now broadcasts to BLE**: `validate.c` `'A'` handler calls
+      `ble_client_send()` after on-chip inference, so each uploaded WAV emits one
+      BLE notification per 2-second window.
+- [x] **Readable notification payload**: BLE characteristic now sends a short ASCII
+      string like `"Present 95%"` instead of a 6-byte binary packet. nRF Connect
+      auto-renders printable ASCII, so each notification reads as text in the live
+      feed. Characteristic also advertises a CUD descriptor naming itself
+      "Heart Sound Classification".
+- [x] **Phone-side verified end-to-end** with nRF Connect on Android (2026-05-12):
+      `HeartSound` (CB:1D:2D:72:53:F1), characteristic `...ABD` notifications
+      arrive as readable strings while WAVs upload from the dashboard.
 
 ### Phase 6 — Polish & exam prep (Apr 24+)
 
@@ -678,3 +734,401 @@ When asked about this project by Dräger / Getemed / Solectrix:
 5. **What would you do differently with more time?** Dynamic cardiac-cycle-adaptive
    windowing using accompanying PPG, severity regression (Levine grade I-VI), federated
    learning across hospital sites, STM32N6 port for Neural-ART NPU (600 GOPS).
+
+---
+
+## Session Log — 2026-05-11 (Laptop upload + scientific dashboard)
+
+### Goal of the session
+
+Replace the synthetic-only firmware flow with a **real-audio** input path:
+- The laptop becomes a thin client that uploads any WAV / 1D NPY.
+- All DSP and ML stays on the STM32, using as much of the available flash as
+  is useful (no need to optimise for size — 2 MB is plenty).
+- The dashboard turns into a scientific ML visualisation, not a passive UART
+  log parser.
+- A "big mixed audio file" with several classes is shipped so the project can
+  be demonstrated end-to-end against ground truth from PhysioNet/CinC 2022.
+
+### Architecture decision: extended binary UART protocol
+
+`CONFIG_LOG` is disabled in `app/prj.conf` so the console UART is binary-clean.
+A new command `'A'` is added in `validate.c`:
+
+```
+Host -> STM32 : 'A' (0x41) + 8000 LE int16 PCM samples
+                (delivered in 128-sample / 256-byte chunks)
+STM32 -> Host : 0xA6 after every 128 samples + one final 0xA6
+STM32 -> Host : 0xA5 + class_id (uint8, after unknown gate)
+              + confidence (uint8, 0..100)
+              + raw_probabilities[3] (uint8 percentages, BEFORE the gate)
+              + gate_applied (uint8, 0 or 1)
+              + dsp_ms (uint16 LE)
+              + inference_ms (uint16 LE)
+              + rms_q15 (uint16 LE, rms  * 32768)
+              + peak_q15 (uint16 LE, peak * 32768)
+              + zcr (uint16 LE, zero-crossings count)
+              + spectrogram[4096] (float32 LE)
+              = 16401 bytes total
+```
+
+The two existing commands (`'T'` test vector and `'S'`/`'P'` synthetic
+start/pause) are retained but no longer used by the dashboard.
+
+### Firmware changes (all under `app/`)
+
+| File | What changed |
+|---|---|
+| `prj.conf` | Removed `CONFIG_LOG`. Added `CONFIG_RING_BUFFER_LARGE=y` for the 40 KB upload RX FIFO. |
+| `src/dsp/mel_spec.h` / `mel_spec.c` | New `g_mel_spec_mutex` so the validate-thread upload path can share `mel_spec_compute()` with the synthetic `dsp_thread`. |
+| `src/main.c` | `dsp_thread` now holds the mel-spec mutex around its compute call. |
+| `src/ml/inference.h` / `inference.cc` | Refactored into a shared `run_inference_core()`. New `inference_run_probs(spec, n, &conf, raw_probs[3], &gate_applied)` returns the **raw** dequantised probabilities and a flag indicating whether the validation-calibrated unknown gate fired. |
+| `src/ml/validate.h` / `validate.c` | New `'A'` upload command. Audio statistics (`rms`, `peak`, `zcr`) computed in `compute_audio_stats()`. Per-stage latency measured with `k_uptime_get_32()`. Extended response packet built byte-by-byte into `uart_poll_out()`. |
+
+#### Static memory footprint added
+
+| Buffer | Size | Purpose |
+|---|---|---|
+| `s_rx_rb` | 40 KB | Interrupt-driven UART RX ring buffer (absorbs full 16 KB audio upload + jitter) |
+| `s_uploaded_audio` | 32 KB | float32 mirror of one 8000-sample window |
+| `s_uploaded_spec` | 16 KB | float32 64x64 spectrogram returned to host |
+
+All in `.bss`. No heap usage. Tensor arena stays at 40 KB and is unchanged.
+
+#### Clean-build size (after the new code)
+
+```
+FLASH: 550 KB / 2 MB   (26.3%)
+RAM  : 423 KB / 768 KB (53.8%)
+```
+
+Build command used: `./build.sh --clean` (writes `build_stm32_synth/`).
+
+Flash command used: `west flash --build-dir build_stm32_synth --runner openocd`.
+OpenOCD wrote 550,656 bytes in 5.3 s over ST-Link on COM6.
+
+### Dashboard rewrite (`dashboard/server.py`)
+
+The previous v2 dashboard was a passive UART log parser that drove
+synthetic-string injection via `'S'`/`'P'`. It has been **fully replaced**
+with a binary-protocol upload client.
+
+User-visible features:
+
+- Custom-Upload tab accepts a WAV (any length, any sample rate) or a 1D
+  audio NPY. 64x64 NPY spectrograms are intentionally rejected so the STM32
+  DSP stage cannot be bypassed.
+- Long uploads are auto-segmented into successive 2-second windows; each
+  window is streamed to the STM32 and classified independently.
+- Optional labels-JSON sidecar (or `<wav-stem>_labels.json` in either
+  `presentation_samples/` or `ml/data_circor/demo/`) is auto-loaded for
+  ground-truth accuracy reporting.
+- Generic Loop tab cycles through `presentation_samples/`, then
+  `ml/data_circor/demo/`, then `ml/data_circor/raw/training_data/`.
+
+Scientific views rendered per upload:
+
+- Aggregate result card (dominant class, confidence gauge, accuracy %)
+- Per-segment probability time-series (3 colored traces; gate-fired points
+  drawn as enlarged dots)
+- Color-coded segment timeline (click any block to load that segment below)
+- Per-class cumulative bar chart
+- Audio RMS over time
+- Latency breakdown (DSP / Inference / UART upload / UART return)
+- Selected-segment waveform + RMS / peak / ZCR / gate flag panel
+- STM32-computed 64x64 mel spectrogram heatmap
+- Audio playback widget for the uploaded window
+- Per-segment results table + CSV export
+
+### Mixed multi-class demo audio (`ml/generate_mixed_demo.py`)
+
+Generates a long composite WAV from the CirCor raw training set with the
+class membership pulled from `raw/training_data.csv`:
+
+```
+py ml\generate_mixed_demo.py --per-class 3 --seed 2026
+->  ml/data_circor/demo/mixed_demo.wav           (18 s, 9 segments)
+->  ml/data_circor/demo/mixed_demo_labels.json   (per-segment ground truth)
+```
+
+### Presentation samples (`presentation_samples/`)
+
+Three single-class CirCor recordings trimmed to **12 s / 6 segments** each,
+peak-normalised, with sidecar labels JSONs:
+
+| File | Class | Patient | Note |
+|---|---|---|---|
+| `01_absent_pid49653.wav` | Absent  | 49653 (Adolescent, AV) | Healthy baseline, quiet S1/S2 only |
+| `02_present_pid9979.wav` | Present | 9979 (TV)              | Holosystolic, grade III/VI, diamond |
+| `03_unknown_pid9983.wav` | Unknown | 9983 (AV)              | Annotator was unsure; should trigger the unknown gate |
+
+A `__build__.py` script regenerates them idempotently from the CirCor raw
+training data and the published murmur labels.
+
+### Hardware results captured this session
+
+#### `mixed_demo.wav` (18 s / 9 segments, 3 per class)
+
+- Per-window on-chip DSP: **~85 ms**
+- Per-window on-chip inference: **~102 ms**
+- UART upload (16 KB at 115200 baud): **~1.4 s**
+- UART return (16 KB spectrogram at 115200 baud): **~1.4 s**
+- 5 of 9 segments matched ground truth. Two `Unknown` predictions came from
+  the calibrated gate elevating low-margin softmax outputs.
+
+#### `presentation_samples/02_present_pid9979.wav` (12 s / 6 segments)
+
+- All 6 segments → **Present**, confidence 51 % → 95 %, gate did not fire.
+- Ground-truth column populated automatically via the sidecar JSON.
+- Per-file accuracy: **100 %**.
+
+### Files added or modified this session
+
+```
+app/prj.conf                          edited
+app/src/dsp/mel_spec.h                edited
+app/src/dsp/mel_spec.c                edited
+app/src/main.c                        edited
+app/src/ml/inference.h                edited
+app/src/ml/inference.cc               edited
+app/src/ml/validate.h                 edited
+app/src/ml/validate.c                 edited
+dashboard/server.py                   rewritten
+ml/generate_mixed_demo.py             NEW
+ml/data_circor/demo/mixed_demo.wav        NEW (generated)
+ml/data_circor/demo/mixed_demo_labels.json NEW (generated)
+presentation_samples/__build__.py     NEW
+presentation_samples/README.md        NEW
+presentation_samples/01_absent_pid49653.wav         NEW
+presentation_samples/01_absent_pid49653_labels.json NEW
+presentation_samples/02_present_pid9979.wav         NEW
+presentation_samples/02_present_pid9979_labels.json NEW
+presentation_samples/03_unknown_pid9983.wav         NEW
+presentation_samples/03_unknown_pid9983_labels.json NEW
+CODEX.md                              rewritten (full handoff)
+CLAUDE.md                             header + this session log
+```
+
+### Things to remember for the next session
+
+- The legacy v1 dashboard from earlier today auto-bound port 8765 in parallel
+  with the new v2 dashboard. If responses ever look like the old single-segment
+  format (top-level `class_id`, no `segments[]`), kill the older Python
+  process that was started from `Digital_Stethoscope` (with backslashes in
+  the command line) and keep only the v2 process started from
+  `Digital_Stethoscope_2`.
+- `tests/` and `ml/05_validate_on_device.py` still use the `'T'` test-vector
+  command. They were left untouched but should be updated to also exercise
+  the new `'A'` upload path before the next release.
+- No git commit was created for any of these changes. `git status` will show
+  the firmware files, dashboard, generators, presentation samples, and md
+  updates as modified / untracked.
+- BLE peripheral firmware is unchanged. The 6-byte BLE notify packet still
+  contains `{class_id, confidence, reserved, timestamp_ms}` from the
+  synthetic-injection pipeline; the upload-path classifications do not
+  currently propagate to BLE.
+
+---
+
+## Session Log — 2026-05-12 (nRF52840 BLE integration)
+
+### Goal of the session
+
+Wire the nRF52840 DK into the system end-to-end so that:
+
+- The STM32 streams every classification (synthetic AND dashboard uploads)
+  to the nRF over a hardware UART bridge.
+- The nRF advertises a custom GATT service and pushes notifications to a
+  paired phone running nRF Connect.
+- The on-air payload is human-readable in the nRF Connect feed (no hex
+  decoding step required for a live demo).
+
+End of session: all three goals reached on hardware, with notifications
+visible on an Android phone from real dashboard uploads of
+`presentation_samples/02_present_pid9979.wav`.
+
+### Bridge re-pinning: USART3 → USART2 (PD5 / D53)
+
+The original spec called for STM32 USART3 (PD8/PD9) as the cross-board UART.
+The NUCLEO-U575ZI-Q does technically expose PD8/PD9, but neither pin is
+labelled "USART3" on the silkscreen or in the user manual quick-reference.
+The pin labelled `USART_B_TX` on the morpho header (D53) is **PD5**, which
+maps to USART2_TX on the STM32U575. Switching the bridge to USART2 made the
+physical wiring obvious and matched the silkscreen.
+
+Firmware changes:
+
+| File | What changed |
+|---|---|
+| `app/app.overlay` | `&usart3` block replaced with `&usart2` block using `usart2_tx_pd5 usart2_rx_pd6` pinctrl entries (both confirmed present in `stm32u575zitxq-pinctrl.dtsi`, AF7). |
+| `app/src/comms/ble_client.c` | `DT_NODELABEL(usart3)` → `DT_NODELABEL(usart2)`; header comment updated. |
+
+Final wiring (only two jumper wires between boards):
+
+```
+STM32 PD5 (USART2 TX, NUCLEO D53)  ─────▶  nRF P0.08 (UART1 RX)
+STM32 GND                          ────── nRF GND
+```
+
+A common ground wire is **required** even though both boards are powered
+from the same PC USB — USB shield ground proved unreliable for UART signal
+levels in our setup.
+
+### nRF firmware flashing
+
+- Default `west flash` runner is `nrfutil`, but Nordic's Python wrapper
+  fails on Python 3.14 with `ModuleNotFoundError: No module named 'constants'`
+  inside `nordicsemi.lister.windows.lister_win32`. Use `--runner jlink`
+  instead; the DK's onboard J-Link enumerates as SEGGER VID 1366 PID 1051
+  and writes the hex over SWD at ~98 KiB/s.
+- The DK exposes **two** JLink CDC UART ports (e.g. COM7 + COM8). On this
+  machine the Zephyr console UART (uart0, P0.06/P0.08… wait no — uart0 is
+  on the J-Link VCOM pair, not the bridge) appears on **COM8**. COM7 is
+  silent in this configuration.
+- Boot banner expected on COM8 within ~300 ms of reset:
+
+  ```
+  *** Booting Zephyr OS build v4.4.0-rc1-178-gccfd5efa09f9 ***
+  <inf> ble_main: === HeartSound BLE Peripheral ===
+  <inf> ble_main: UART1 ready (115200 baud)
+  <inf> bt_hci_core: Identity: CB:1D:2D:72:53:F1 (random)
+  <inf> hsc_service: Heart Sound Classification service registered
+  <inf> ble_main: Advertising as 'HeartSound' — connect with nRF Connect app
+  ```
+
+### Dashboard-upload BLE hook (`'A'` command path)
+
+Previously only `comm_thread` (fed by the synthetic-injection pipeline)
+called `ble_client_send()`. The dashboard `'A'`-command path in
+`validate.c` ran on-chip inference and built the extended response packet
+but never fanned out to the nRF.
+
+Fix (`app/src/ml/validate.c`):
+
+```c
+#include "comms/ble_client.h"
+...
+uint8_t out_class = (class_id < 0) ? 0xFFu : (uint8_t)class_id;
+ble_client_send(out_class, confidence, k_uptime_get_32());   // ← added
+/* 4. Extended response packet. */
+send_byte(VALIDATE_MAGIC);
+...
+```
+
+Result: every WAV uploaded to the dashboard now produces exactly one BLE
+notification per 2-second window. A 12-second WAV from
+`presentation_samples/` produces six phone notifications, ~3 s apart
+(2 s window + ~1.4 s UART up + ~1.4 s UART return + ~190 ms compute).
+
+### Stale 4-class labels on nRF side
+
+`ble_peripheral/src/main.c` was still using the pre-CirCor 4-class label
+table `{"Normal","SysMurmur","DiaMurmur","S3Gallop"}` for its `LOG_INF`
+trace. The STM32 has been emitting CirCor 3-class IDs (0/1/2) since
+2026-05-09, so class 2 was being printed as `"DiaMurmur"` on the nRF
+console even though the on-chip model treats it as `"Unknown"`.
+
+Replaced with `{"Absent","Present","Unknown"}` and bound-checked via
+`ARRAY_SIZE(names)`. Header comment in `heart_sound_service.c` updated
+to match.
+
+### BLE payload: 6-byte binary → printable ASCII
+
+User feedback from nRF Connect after the first end-to-end test: the
+notifications showed up as raw hex like `(0x) 01-5F-00-93-11-03`, which is
+correct but unreadable for a live demo. nRF Connect renders ASCII
+payloads as strings automatically (e.g. it already showed the device name
+`HeartSound` as text in the Device Name characteristic).
+
+Rewrote `hsc_service_notify()` in
+`ble_peripheral/src/heart_sound_service.c` to build a short printable
+string via `snprintf` and notify that instead:
+
+```c
+static const char *const class_names[] = {"Absent","Present","Unknown"};
+char pkt[20];
+int len = snprintf(pkt, sizeof(pkt), "%s %u%%", name, confidence);
+bt_gatt_notify(...)   // len bytes, no trailing NUL
+```
+
+Also added a Characteristic User Description (CUD) descriptor so the
+characteristic now advertises a human-readable name in the service browser:
+
+```c
+BT_GATT_CUD("Heart Sound Classification", BT_GATT_PERM_READ),
+```
+
+After this change Android nRF Connect needed a single disconnect /
+reconnect cycle to drop its cached GATT structure and pick up the new
+descriptor.
+
+### `bt_le_adv_start()` does NOT auto-resume after a phone-side disconnect
+
+The `disconnected()` callback in `ble_peripheral/src/main.c` re-calls
+`bt_le_adv_start()`, but only fires once the controller has actually
+observed the link drop. When the Android side of the link closes
+abruptly (e.g. nRF Connect "Disconnect" button without a proper L2CAP
+teardown), the controller can sit in a half-open state for tens of
+seconds before the disconnect callback fires, during which the device
+will NOT show up in a scan. A SoC reset clears it instantly.
+
+Fastest reset from this PC, no power-cycle needed:
+
+```
+"C:\Program Files\SEGGER\JLink\JLink.exe" -device nRF52840_xxAA -if SWD \
+    -speed 4000 -autoconnect 1 -CommanderScript reset.cmd
+# reset.cmd contents:
+#   r
+#   g
+#   exit
+```
+
+Boot banner reappears on COM8 within ~300 ms and `HeartSound` shows up in
+the scanner immediately.
+
+### Files added or modified this session
+
+```
+app/app.overlay                      USART3 block replaced with USART2 (PD5/PD6)
+app/src/comms/ble_client.c           DT_NODELABEL(usart3) → usart2 + comment
+app/src/ml/validate.c                +#include "comms/ble_client.h";
+                                     ble_client_send() after on-chip inference
+ble_peripheral/src/main.c            4-class names → CirCor 3-class names
+ble_peripheral/src/heart_sound_service.c
+                                     ASCII payload via snprintf;
+                                     BT_GATT_CUD descriptor;
+                                     header comment updated
+CLAUDE.md                            this session log + Phase 5 marked complete
+README.md                            Phase 5 status, BLE GATT section, pin table
+CODEX.md                             new handoff entry for today
+```
+
+### Measured hardware results
+
+- STM32 build after BLE-hook + USART2 change: FLASH 550500 B / 2 MB
+  (26.25%), RAM 423276 B / 768 KB (53.82%). Footprint unchanged from the
+  2026-05-11 build except for `ble_client_send()` inlining.
+- nRF build: FLASH 122124 B / 1 MB (11.65%), RAM 22534 B / 256 KB (8.60%).
+- Synthetic-loop bridge test: 6 packets / 12 s, all decoded correctly on
+  the nRF console.
+- `presentation_samples/02_present_pid9979.wav` upload from dashboard: 6
+  segments, all classified as `Present`, all six BLE notifications visible
+  on Android nRF Connect as `"Present NN%"` strings.
+
+### Things to remember for the next session
+
+- The STM32 ↔ nRF wire IS USART2 (PD5 / D53), not USART3 — older comments
+  and earlier drafts of this file mention USART3.
+- nRF flashing requires `--runner jlink`. `nrfutil` is broken until Nordic
+  publishes a Python 3.14-compatible wheel.
+- The default Zephyr console UART on the nRF52840 DK shows up on **COM8**
+  in this PC's enumeration order, not COM7. If you read COM7 you will
+  see nothing.
+- A clean disconnect/reconnect on the phone is sometimes necessary after a
+  service-definition change (CUD descriptor add etc.); Android nRF Connect
+  caches GATT structure aggressively.
+- After a phone-side abrupt disconnect, advertising may not auto-resume
+  until the controller observes the link drop — reset the nRF via J-Link
+  Commander if `HeartSound` stops appearing in scans.
+- `flash_out.log` / `flash_err.log` and the downloaded nRF Connect log
+  file under `dashboard/` are session artifacts; do not commit them.

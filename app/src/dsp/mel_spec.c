@@ -24,6 +24,8 @@
 
 LOG_MODULE_REGISTER(mel_spec, LOG_LEVEL_INF);
 
+K_MUTEX_DEFINE(g_mel_spec_mutex);
+
 /* -------------------------------------------------------------------------
  * Internal buffers (static — no heap allocation at runtime)
  * ------------------------------------------------------------------------- */

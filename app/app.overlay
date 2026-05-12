@@ -4,7 +4,9 @@
  * Current revision:
  *   - No active ICS-43434 microphone path.
  *   - Synthetic PCG strings are rendered in firmware and classified locally.
- *   - USART3 remains enabled for the nRF52840 UART bridge.
+ *   - USART2 is enabled for the nRF52840 UART bridge.
+ *     PD5 (USART_B_TX, NUCLEO header D53) -> nRF P0.08 (UART1 RX).
+ *     PD6 (USART_B_RX) is configured but not wired (TX-only bridge).
  *
  * Future microphone option:
  *   STM32U575 uses SAI rather than a classic I2S peripheral. If a compatible
@@ -16,10 +18,10 @@
     status = "disabled";
 };
 
-/* USART3 - bridge to nRF52840 */
-&usart3 {
+/* USART2 - bridge to nRF52840 (PD5 TX -> nRF P0.08) */
+&usart2 {
     status = "okay";
-    pinctrl-0 = <&usart3_tx_pd8 &usart3_rx_pd9>;
+    pinctrl-0 = <&usart2_tx_pd5 &usart2_rx_pd6>;
     pinctrl-names = "default";
     current-speed = <115200>;
 };

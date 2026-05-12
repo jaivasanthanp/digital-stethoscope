@@ -111,7 +111,9 @@ static void dsp_thread(void *p1, void *p2, void *p3)
     while (1) {
         k_msgq_get(&audio_q, audio_in, K_FOREVER);
 
+        k_mutex_lock(&g_mel_spec_mutex, K_FOREVER);
         mel_spec_compute(audio_in, AUDIO_BUF_SAMPLES, spec_out, SPEC_ROWS, SPEC_COLS);
+        k_mutex_unlock(&g_mel_spec_mutex);
 
         if (k_msgq_put(&spectrogram_q, spec_out, K_NO_WAIT) != 0) {
             LOG_WRN("spectrogram_q full — dropped");
