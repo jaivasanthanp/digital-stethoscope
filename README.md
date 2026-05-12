@@ -1,23 +1,41 @@
 # Digital Stethoscope — Edge AI Heart Sound Classifier
 
 > Real-time PCG classification on STM32U575 using TFLite Micro + Zephyr RTOS.
-> No cloud. No proprietary IDEs. Pure embedded ML at ~102 ms inference per window.
+> No cloud. No proprietary IDEs. Pure embedded ML, ~507 ms / window with a
+> 720 K-parameter ResNet-18-tiny on chip.
 
-A wearable digital stethoscope prototype. The **laptop dashboard uploads any
-WAV / 1D audio NPY** to the STM32U575 over UART (`'A'` command, binary
-protocol). The STM32 receives raw 8000-sample 4 kHz PCM, computes the mel
-spectrogram on chip, runs a quantized ResNet-10 INT8 CNN to classify **Absent
-/ Present / Unknown murmur status** (PhysioNet/CinC 2022 CirCor DigiScope
-labels) with a validation-calibrated unknown gate, and returns per-stage
-latency, audio statistics, raw 3-class probabilities, and the full 64×64
-spectrogram in a single response packet. The dashboard renders a scientific
-multi-segment view (probability time-series, segment timeline, per-class
-bars, audio RMS, latency breakdown, mel spectrogram heatmap).
+A wearable digital stethoscope prototype. Three audio sources, all converging
+on the same on-chip DSP + INT8 CNN inference path on the STM32U575:
 
-Synthetic PCG strings are still rendered on chip as a self-test demo path
-(`'S'` / `'P'` UART commands) but are not used by the dashboard. The
-ICS-43434 microphone is discontinued for this revision; SAI/I2S microphone
-support can be re-introduced later behind the existing audio source API.
+1. **File upload** — drop in a `WAV`, `M4A`, `MP3`, `AAC`, `OGG`, `FLAC`,
+   `WebM`, or `1D NPY`. Bundled ffmpeg decodes any of them; long files are
+   auto-segmented into successive 2-second windows.
+2. **Live laptop microphone** — browser Web Audio API captures from the
+   default mic, downsamples to 4 kHz, ships each 2-second window to the
+   STM32 in real time.
+3. **Synthetic PCG self-test** — on-chip 4 kHz audio rendered from a tiny
+   script, kept around for hardware-without-host demos (`'S'` / `'P'`
+   commands on UART).
+
+The STM32 receives raw 8000-sample 4 kHz PCM, computes the mel spectrogram
+on chip, runs a quantized **ResNet-18-tiny INT8 CNN** (CirCor 2022 weights)
+to classify **Absent / Present / Unknown** murmur status with a
+validation-calibrated unknown gate, and returns per-stage latency, audio
+statistics, raw 3-class probabilities, and the full 64×64 spectrogram in a
+single response packet. The dashboard renders a scientific multi-segment
+view (probability time-series, segment timeline, per-class bars, audio RMS,
+latency breakdown, mel spectrogram heatmap).
+
+Every classification is also pushed to the **nRF52840 DK over a UART
+bridge** (STM32 PD5 / NUCLEO D53 → nRF P0.08, plus GND) and broadcast as a
+BLE notification to a paired phone (custom service
+`12345678-1234-1234-1234-123456789ABC`). nRF Connect renders each
+notification as readable text like `"Present 95%"` thanks to a printable
+ASCII payload and a CUD descriptor named `"Heart Sound Classification"`.
+
+The ICS-43434 MEMS microphone is discontinued for this revision; future
+optional SAI/I2S microphone support can be re-introduced behind the existing
+`audio_capture_init()` / `audio_capture_get_window()` API.
 
 ## Live demo files
 
@@ -361,15 +379,32 @@ python presentation_samples/__build__.py    # 3 single-class demo WAVs + labels
 ### Run the live dashboard
 
 ```powershell
+pip install -r ml/requirements.txt   # one-time, includes imageio-ffmpeg for M4A/MP3 decoding
 C:\Users\<user>\AppData\Local\Programs\Python\Python311\python.exe dashboard\server.py --port COM6 --baud 115200
 # Open http://127.0.0.1:8765 in any modern browser.
 ```
 
-Upload `presentation_samples/02_present_pid9979.wav` for the cleanest live
-demo (all 6 windows classify as Present, ground truth comes from the sidecar
-JSON, accuracy column reads 100%). Upload `ml/data_circor/demo/mixed_demo.wav`
-to demonstrate the full segment timeline and the unknown-gate behaviour on
-borderline windows.
+The dashboard exposes three tabs:
+
+- **Custom Upload** — drop in any audio file (`WAV`, `M4A`, `MP3`, `AAC`,
+  `OGG`, `FLAC`, `WebM`, or `1D NPY`). Long files auto-segment into
+  successive 2-second windows. Phone recordings get peak-normalised
+  automatically when their peak amplitude is below half scale.
+- **Generic Loop** — cycle through `presentation_samples/`, then
+  `ml/data_circor/demo/`, then a slice of CirCor raw training data.
+- **Live Mic** — capture from the default laptop microphone via the
+  Web Audio API, downsample to 4 kHz, ship each 2-second window to the
+  STM32 in real time. Grant mic permission in the browser the first time.
+
+Recommended live demos:
+- `presentation_samples/02_present_pid9979.wav` — all 6 windows classify
+  as Present, ground truth comes from the sidecar JSON, accuracy column
+  reads 100 %.
+- `ml/data_circor/demo/mixed_demo.wav` — full segment timeline and
+  unknown-gate behaviour on borderline windows.
+- A phone-recorded heartbeat (`.m4a` straight from any iPhone / Android
+  voice memo app) — verified working with the auto-boost normalization;
+  a healthy adult recording produces 5/5 Absent at ~80 % confidence.
 
 Measured on hardware (NUCLEO-U575ZI-Q @ 160 MHz, 115200 baud UART):
 
@@ -438,13 +473,41 @@ window emits one notification on the phone, ~3 s apart.
 | 2 | TFLite Micro on STM32U575 — flashed, measured | Done |
 | 3 | STFT/Mel DSP chain on U575 — full pipeline running | Done |
 | 4 | Synthetic PCG string self-test path | Done |
-| 4b | **Laptop audio upload over UART (`'A'` command)** | **Done — measured on hardware** |
-| 4c | **Browser dashboard with multi-segment scientific charts** | **Done** |
-| 4d | **CirCor demo audio (mixed + presentation samples)** | **Done** |
-| 5  | **nRF52840 BLE — flashed, bridge verified, phone notifications confirmed** | **Done (2026-05-12)** |
-| 5b | **Dashboard-upload classifications fan out to BLE** | **Done (2026-05-12)** |
-| 5c | **Readable ASCII payload + CUD descriptor for live demo** | **Done (2026-05-12)** |
-| 6 | Polish, README, demo video | In progress |
+| 4b | Laptop audio upload over UART (`'A'` command) | Done |
+| 4c | Browser dashboard with multi-segment scientific charts | Done |
+| 4d | CirCor demo audio (mixed + presentation samples) | Done |
+| 5  | nRF52840 BLE — flashed, bridge verified, phone notifications confirmed | Done (2026-05-12) |
+| 5b | Dashboard-upload classifications fan out to BLE | Done (2026-05-12) |
+| 5c | Readable ASCII payload + CUD descriptor for live demo | Done (2026-05-12) |
+| 6a | **Dashboard accepts M4A / MP3 / AAC / OGG / FLAC + auto-boost normalization** | **Done (2026-05-12)** |
+| 6b | **Dashboard Live Mic mode (Web Audio API)** | **Done (2026-05-12)** |
+| 6c | **Bigger CNN deployment — ResNet-18, 720 K params, 756 KB INT8 on STM32** | **Done (2026-05-12)** |
+| 6d | Levine grade / severity head — dataset investigation | Done; implementation deferred |
+| 7a | Temporal GRU head over consecutive windows | Deferred — multi-day rewrite |
+| 7b | Phone → BLE → STM32 audio streaming | Deferred — needs extra wire + firmware |
+| 7c | ResNet-18 accuracy recovery (dropout / mixup / stronger SpecAugment) | Deferred — single experiment |
+| 8 | Polish, demo video | In progress |
+
+### Next-session work (priorities in order)
+
+1. **Recover ResNet-18 test accuracy.** Add Dropout(0.2), weight decay
+   5e-4, stronger SpecAugment, optional mixup. If the gap doesn't close,
+   revert `app/src/ml/model_data.cc` to the ResNet-10 INT8 array and
+   keep ResNet-18 as a parallel experiment.
+2. **Phone → BLE → STM32 audio streaming.** Adds the second jumper wire
+   (nRF P0.06 → STM32 PD6), the new WRITE-without-response GATT
+   characteristic on the nRF that buffers 16 KB of PCM, forwards over
+   UART using the existing `'A'`-protocol, and BLE-notifies the result
+   back. Turns the project from "dashboard-uploads-WAVs" into "wireless
+   wearable stethoscope".
+3. **Severity head (Levine grade).** CirCor has 178 patients with
+   systolic grades (I/VI:104, II/VI:28, III/VI:46). Add a multi-task
+   head on the shared backbone, masked loss for Absent / Unknown
+   patients, multi-output INT8 PTQ, second-output read on STM32,
+   "Severity" column on the dashboard.
+4. **Temporal GRU head.** Sequence dataloader, small GRU over GAP
+   embeddings of 4-5 consecutive windows, STM32 embedding ring buffer.
+   Reduces class flicker on borderline windows.
 
 ---
 
@@ -454,11 +517,28 @@ window emits one notification on the phone, ~3 s apart.
 
 **TFLite Micro over STM32Cube.AI:** Cube.AI links against a proprietary `.a` library that requires CubeIDE project scaffolding — incompatible with Zephyr CMake. TFLite Micro builds cleanly under `west build`. CMSIS-NN backend provides the same Cortex-M33 DSP optimizations. Accepted ~15% latency penalty (102 ms vs ~88 ms estimated for Cube.AI) in exchange for toolchain portability.
 
-**ResNet-10 over VGG:** VGG-16 has 138M parameters — impossible on MCU. ResNet-10 has ~81K parameters with residual connections solving vanishing gradients, enabling deep feature extraction within 786 KB SRAM.
+**ResNet over VGG:** VGG-16 has 138M parameters — impossible on MCU. Both
+the ResNet-10 (81 K params) and ResNet-18-tiny (720 K params) variants in
+this project use residual connections to solve the vanishing gradient
+problem, enabling deep feature extraction within the U575's 768 KB SRAM.
 
-**Mel-spectrogram over raw audio:** 75% of diagnostically relevant cardiac energy lives below 600 Hz. Linear FFT wastes 70% of bins on noise. Mel scale concentrates resolution in the cardiac band. Log power compression equalizes S1 amplitude vs murmur amplitude.
+**ResNet-18 over ResNet-10 (current deploy):** The bigger variant
+demonstrates how to use the previously-unused flash headroom and exercises
+the full retrain → requantize → reflash pipeline. Honest finding kept in
+the repo: on this dataset (~8.8 K training spectrograms) the extra
+capacity actually hurts test accuracy (-10 pp), a real overfit signature.
+The accuracy-recovery work (dropout, mixup, stronger SpecAugment) is
+listed under "Next-session work" rather than papered over.
 
-**INT8 quantization:** model size reduction to 102.2 KB, ~4× inference speedup via CMSIS-NN integer MACs, and no observed accuracy loss on the current test split.
+**Mel-spectrogram over raw audio:** 75% of diagnostically relevant
+cardiac energy lives below 600 Hz. Linear FFT wastes 70% of bins on
+noise. Mel scale concentrates resolution in the cardiac band. Log power
+compression equalizes S1 amplitude vs murmur amplitude.
+
+**INT8 quantization:** 3.7× model-size reduction (2.8 MB float32 → 756 KB
+INT8 on ResNet-18; 313 KB → 102 KB on ResNet-10), 3-4× inference speedup
+via CMSIS-NN integer MACs, and ≤ 0.4 pp accuracy drop in both cases —
+the quantization path is rock-solid even on the bigger network.
 
 ---
 

@@ -1,10 +1,213 @@
 # Digital Stethoscope (v2 / CirCor 2022) — Session Handoff
 
-Last updated: 2026-05-12 (Claude session, BLE end-to-end verified)
+Last updated: 2026-05-12 (Claude session, M4A + live mic + ResNet-18 + BLE end-to-end)
 
-## Project state at end of session (2026-05-12)
+## Project state at end of session (2026-05-12, second handoff)
 
-End-to-end demo path is now complete:
+Three big things landed on top of the morning's BLE integration:
+
+1. **Phone-recorded M4A → classification.** The dashboard now decodes
+   any ffmpeg-supported audio format (`.m4a`, `.mp3`, `.aac`, `.ogg`,
+   `.flac`, `.webm`, `.opus`, `.mp4`, `.m4b`, …) via a bundled
+   `imageio-ffmpeg` binary. Quiet phone recordings get a soft
+   peak-normalisation (`auto_boost`, kicks in only when peak < 0.5).
+2. **Live laptop microphone mode.** New tab next to Custom Upload /
+   Generic Loop. Browser Web Audio API captures from the default mic,
+   downsamples to 4 kHz, ships each 2-second window to the STM32 in
+   real time. No server changes beyond the tab markup.
+3. **ResNet-18-tiny deployed to STM32U575.** Bigger CNN (720 K params,
+   756 KB INT8, ~507 ms inference) replacing the 81 K-param ResNet-10
+   baseline. Demonstrates that the previously-unused 1.45 MB flash and
+   345 KB RAM headroom are now being used (FLASH 58 %, RAM 75 %).
+
+Plus a real engineering finding kept visible in the docs:
+**ResNet-18's test accuracy is 10 pp LOWER than ResNet-10's** on the same
+CirCor test split (70.9 % vs 81.5 %). Classic small-dataset overfitting.
+The deploy is intentionally kept as-is, with the accuracy-recovery work
+(dropout, mixup, stronger SpecAugment) listed as a next-session
+experiment rather than papered over.
+
+Also: Levine grade severity-head data was investigated. CirCor 2022 has
+178 patients with systolic Levine grades (I/VI / II/VI / III/VI) in
+`training_data.csv`. Severity regression is feasible; implementation is
+half-day of focused work, deferred to next session.
+
+## What changed this half-session
+
+### Dashboard: M4A + auto-boost
+
+`dashboard/server.py` (committed `b8b844e`):
+
+- `_get_ffmpeg()` resolves the bundled `imageio_ffmpeg` binary
+  (`ffmpeg-win-x86_64-v7.1.exe`), with `shutil.which("ffmpeg")` as
+  fallback.
+- `load_compressed(path)` shells out to ffmpeg for `-f wav -acodec
+  pcm_s16le -ac 1 -ar 4000 -` and reads the resulting WAV from
+  `proc.stdout` via `soundfile.read(io.BytesIO(...))`.
+- `auto_boost(audio, target_peak=0.95, min_peak_threshold=0.5)` scales
+  to 0.95 peak only when the input is below half scale, so loud
+  recordings pass through unchanged.
+- `COMPRESSED_SUFFIXES` set drives the `preprocess_input_file()`
+  dispatch.
+- File-input `accept` attribute and the "choose a file" error message
+  updated to advertise the broader format list.
+
+### Dashboard: Live Mic tab
+
+`dashboard/server.py` (committed `344a0bb`):
+
+- Third tab `Live Mic` next to Custom Upload and Generic Loop.
+- `setMode(mode)` handles three modes instead of two.
+- `startLiveMic()` requests mic permission via
+  `navigator.mediaDevices.getUserMedia({audio: {channelCount: 1,
+  echoCancellation: false, noiseSuppression: false,
+  autoGainControl: false}})`.
+- `AudioContext` + deprecated-but-stable `ScriptProcessorNode(4096)`
+  feeds 4096-sample chunks at the device's native rate (44.1 or 48 kHz).
+- Buffer 2 seconds, downsample to 4 kHz via `downsampleLinear`, convert
+  to int16 via `floatToInt16`, build a 44-byte-header WAV in
+  `buildWavBlob`, POST as `FormData` to existing `/api/classify`.
+- Serialised: classification is in flight while next window is being
+  captured. Queue depth 1 holds the most recent next window.
+- `liveSerialPort` `<select>` shares the same port-list loader as the
+  other two tabs.
+
+### ML pipeline: `--arch` flag
+
+`ml/03_quantize.py` (committed `344a0bb`):
+
+- `build_resnet18(use_se=True)` adds the bigger variant: 3 stages with
+  2 ResBlocks each, widths 32/64/128, ~720 K params float32 → ~700 KB
+  INT8 raw.
+- `build_model(arch, use_se)` dispatches on `arch in {resnet10,
+  resnet18}`.
+- Output files arch-prefixed: `resnet18_int8.tflite`,
+  `resnet18_keras_best.keras`, `resnet18_savedmodel/`, etc.
+- `--arch` CLI flag defaults to `resnet10` for backwards compatibility.
+
+`ml/04_export.py` (committed `344a0bb`):
+
+- Matching `--arch` flag picks which `.tflite` to embed into
+  `app/src/ml/model_data.cc`.
+
+`.gitignore` (committed `a7aa831`):
+
+- Added `ml/models/*_keras_best.keras`,
+  `ml/models/resnet18_savedmodel/`, `ml/models/*_train_log.txt`.
+
+### STM32 firmware: tensor arena bump
+
+`app/src/ml/inference.cc` (committed `344a0bb`):
+
+- `tensor_arena[40 * 1024]` → `tensor_arena[200 * 1024]` so the bigger
+  intermediate feature maps fit. Op resolver unchanged (same 12 ops).
+
+### Training command and outcome
+
+```
+python ml/03_quantize.py --arch resnet18 --epochs 50 --batch-size 32
+```
+
+CPU-only training, ~40 s per epoch. Early-stopped at epoch 32 with
+weights restored from epoch 22.
+
+```
+Best val_acc           : 74.2%   (vs ResNet-10's 63.2%)
+Keras float32 test_acc : 71.3%
+Float32 TFLite test    : 71.3%
+INT8 TFLite test       : 70.9%   (-0.4 pp from float32)
+Compression            : 3.7x
+INT8 model size        : 756 KB
+```
+
+### Deploy and verification
+
+```
+python ml/04_export.py --arch resnet18   # -> app/src/ml/model_data.cc (756 KB array)
+./build.sh                               # FLASH 1.22 MB / 2 MB (58.2 %), RAM 587 KB / 768 KB (74.7 %)
+west flash --build-dir build_stm32_synth --runner openocd
+```
+
+`'T 0'` test from the dashboard → `A5 00 47` = ACK + Absent + 71 %.
+
+Re-running the user's `Myownheartbeat.m4a` (9.54 s, M4A) end-to-end
+through dashboard → STM32 ResNet-18 → BLE:
+
+```
+Dominant      : Absent (avg conf 80%)
+Counts        : {absent: 5, present: 0, unknown: 0}
+Latencies avg : DSP 84 ms, Inference 507 ms
+Window 0 82%  82/18/0
+Window 1 88%  88/13/0
+Window 2 75%  75/25/0
+Window 3 88%  88/12/0
+Window 4 68%  68/30/1
+```
+
+Same verdict as ResNet-10 — both models agree the user's heartbeat is
+healthy.
+
+### Levine grade investigation (not committed; documented only)
+
+`ml/data_circor/raw/training_data.csv` columns include `Murmur`,
+`Systolic murmur grading` (178 labelled), `Diastolic murmur grading` (5
+labelled). Systolic distribution: I/VI 104 patients, II/VI 28, III/VI
+46. Enough for a multi-task auxiliary head trained jointly on the
+shared backbone. Full implementation is half-day:
+dataloader masking, multi-head model, joint loss, multi-output INT8
+PTQ, second-output read on STM32, dashboard column.
+
+## Final commit timeline
+
+```
+b8b844e Accept M4A/MP3/AAC/OGG/FLAC uploads via bundled ffmpeg
+344a0bb Scaffold ResNet-18, live-mic dashboard tab, prep STM32 for bigger model
+a7aa831 Deploy ResNet-18 to STM32: 720 K params, 756 KB INT8, 507 ms inference
+(this) Update CLAUDE.md / README.md / CODEX.md with end-of-day handoff
+```
+
+All on `origin/master`. Branch is currently `ahead 0` of remote (or 1
+if you count this doc commit).
+
+## Quick start for the next session
+
+1. `git status --short --branch` — verify clean / aligned with remote.
+2. `cd C:/Users/jaiva/Desktop/Internship_Files/STM_Project/Digital_Stethoscope_2`.
+3. `./build.sh` — verify STM32 builds (should land at ~1.22 MB FLASH).
+4. `west flash --build-dir build_stm32_synth --runner openocd`.
+5. nRF: `west flash --build-dir build_ble --runner jlink` (skip if not
+   touching BLE).
+6. `py dashboard\server.py --port COM6 --baud 115200`, open
+   `http://127.0.0.1:8765`.
+7. Pick one of the deferred tasks (recommend ResNet-18 accuracy
+   recovery first, then BLE audio streaming).
+
+## What is NOT done (handoff)
+
+1. **ResNet-18 accuracy recovery.** Add Dropout(0.2) on GAP output and
+   after each ResBlock add. Increase weight decay 1e-4 → 5e-4. More
+   aggressive SpecAugment (2-3 freq masks, 2-3 time masks per spec
+   instead of 1+1). Optional mixup. If gap doesn't close, revert
+   `model_data.cc` to `resnet10_int8.tflite`.
+2. **Phone → BLE → STM32 audio streaming (task 6 from upgrade list).**
+   Add wire nRF P0.06 (UART1 TX) → STM32 PD6 (USART2 RX). nRF needs
+   new WRITE-without-response GATT characteristic with 16 KB
+   accumulator + forward to STM32 over UART using the existing
+   `'A'`-protocol. STM32 returns extended response over existing
+   PD5→nRF P0.08 wire; nRF parses class + confidence; BLE-notifies
+   back. Phone-side sender needs to be a bleak Python script or
+   Flutter / SwiftUI app.
+3. **Severity head (task 5).** Detailed above; implementation
+   deferred.
+4. **Temporal GRU head (task 4).** Sequence dataloader, GRU over GAP
+   embeddings of 4-5 consecutive windows, STM32 embedding ring buffer.
+   Multi-day rewrite.
+
+---
+
+## Earlier this session (morning) — nRF52840 BLE integration
+
+End-to-end demo path completed in the morning slot of this session:
 
 ```
 WAV  ─dashboard upload──▶  STM32U575  ─USART2 PD5─▶  nRF52840 DK  ─BLE─▶  Phone
@@ -17,11 +220,11 @@ presentation sample produces six BLE notifications on the phone, each
 rendered as readable text (`"Present 95%"`, `"Absent 91%"`, `"Unknown 14%"`,
 or `"Error 0%"`).
 
-Verified end-to-end on hardware this session: STM32U575 NUCLEO-U575ZI-Q +
+Verified end-to-end on hardware in the morning: STM32U575 NUCLEO-U575ZI-Q +
 nRF52840 DK + Android phone running nRF Connect, uploading
 `presentation_samples/02_present_pid9979.wav` from the local dashboard.
 
-## What changed this session
+## What changed in the morning slot
 
 ### 1. UART bridge re-pinned: USART3 → USART2 (PD5 / NUCLEO D53)
 

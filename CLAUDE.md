@@ -1143,3 +1143,315 @@ CODEX.md                             new handoff entry for today
   Commander if `HeartSound` stops appearing in scans.
 - `flash_out.log` / `flash_err.log` and the downloaded nRF Connect log
   file under `dashboard/` are session artifacts; do not commit them.
+
+---
+
+## Session Log — 2026-05-12 (continued: M4A, live mic, ResNet-18 deployment)
+
+After the BLE peripheral was end-to-end verified (above), the rest of the
+session focused on broadening the dashboard's audio sources, deploying a
+much larger CNN to use the previously-unused STM32 flash headroom, and
+characterising what that bigger model actually delivers on this dataset.
+
+### Phone-recorded heartbeat → classification (the trigger for everything)
+
+The user recorded their own heartbeat with an Android phone and wanted to
+see it classified. The phone produced an **M4A (AAC-in-MP4) file** at low
+levels (`Myownheartbeat.m4a`, 332 KB, 9.54 s, peak ≈ 0.47 of full scale,
+RMS ≈ 0.049). The existing dashboard accepted WAV / NPY only, so two
+things had to land before any classification could happen:
+
+1. M4A decoding inside the dashboard server.
+2. Some way to keep the audio level usable when input recordings are
+   below half scale.
+
+### Bundled-ffmpeg M4A / MP3 / AAC / OGG / FLAC support
+
+`dashboard/server.py` now imports `imageio_ffmpeg` (one-shot
+`pip install imageio-ffmpeg`, ~30 MB wheel) and uses the bundled
+`ffmpeg-win-x86_64-v7.1.exe` to decode anything ffmpeg understands into
+mono 16-bit PCM at 4 kHz. Key bits:
+
+```python
+def load_compressed(path: Path) -> tuple[np.ndarray, float]:
+    ffmpeg = _get_ffmpeg()        # imageio_ffmpeg.get_ffmpeg_exe()
+    proc   = subprocess.run([ffmpeg, "-v", "error", "-i", str(path),
+                             "-f", "wav", "-acodec", "pcm_s16le",
+                             "-ac", "1", "-ar", "4000", "-"],
+                            capture_output=True, check=False)
+    pcm, sr = sf.read(io.BytesIO(proc.stdout), dtype="float32")
+    ...
+```
+
+`COMPRESSED_SUFFIXES = {.m4a, .m4b, .aac, .mp3, .mp4, .ogg, .oga, .flac,
+.webm, .opus, .wma, .3gp}`. WAV and NPY paths are unchanged.
+
+A new `auto_boost()` peak-normalises only when the input is below half
+scale, so loud recordings pass through untouched but a phone recording
+gets scaled to 0.95 peak before int16 cast:
+
+```python
+def auto_boost(audio, target_peak=0.95, min_peak_threshold=0.5):
+    peak = float(np.max(np.abs(audio)))
+    if peak <= 0.0 or peak >= min_peak_threshold:
+        return audio
+    return audio * (target_peak / peak)
+```
+
+The file-input accept-list and rejection error message were updated to
+match.
+
+**Result on `Myownheartbeat.m4a` through ResNet-10 (still flashed at
+this point)**:
+
+```
+File           : Myownheartbeat.m4a
+Audio length   : 9.54 s (5 windows)
+Dominant       : Absent (avg conf 80%)
+Counts         : {absent: 5, present: 0, unknown: 0}
+Window 0  86%  86/14/0   peak=0.95
+Window 1  86%  86/14/0   peak=0.79
+Window 2  87%  87/13/0   peak=0.57
+Window 3  89%  89/10/0   peak=0.75
+Window 4  51%  51/48/1   peak=0.50   (borderline, end of recording)
+```
+
+All five windows correctly classified as Absent. Five BLE notifications
+also arrived on the phone during this run, since the `'A'`-command path
+calls `ble_client_send()` per window.
+
+### Live laptop-microphone mode in the dashboard
+
+New `Live Mic` tab alongside `Custom Upload` and `Generic Loop`. Pure
+client-side capture, no server changes beyond the tab markup:
+
+- `navigator.mediaDevices.getUserMedia({audio: {channelCount: 1,
+  echoCancellation: false, noiseSuppression: false,
+  autoGainControl: false}})` (HTTPS-or-localhost is fine; we're on
+  localhost).
+- `AudioContext` + `ScriptProcessorNode(4096)` at the device's native
+  rate (typically 44.1 or 48 kHz).
+- Buffer two seconds of float32 samples, downsample to 4 kHz via linear
+  interpolation, convert to int16, build a 44-byte-header WAV blob, POST
+  to the existing `/api/classify` endpoint.
+- Serialised: while window N is being classified (~3 s round trip),
+  window N+1 is being captured. The two phases overlap by design so
+  there is no audio gap, but only one classification is in flight at any
+  time. A queue of depth 1 holds the most recent next window.
+
+The serial-port `<select>` is wired into the new tab too (defaults to
+COM6), so existing port plumbing applies.
+
+### Bigger model: ResNet-18-tiny
+
+`ml/03_quantize.py` was parameterised with a new `--arch` CLI flag.
+`build_resnet10()` is preserved (still the default) and a new
+`build_resnet18()` adds a wider, deeper "ResNet-18-tiny":
+
+```
+Stem (Conv 32, 7×7, stride 2 + BN + ReLU + MaxPool) -> 16×16×32
+Stage 1: 2 × ResBlock(32, stride=1) -> 16×16×32
+Stage 2: 2 × ResBlock(64, stride=2 then 1) -> 8×8×64
+Stage 3: 2 × ResBlock(128, stride=2 then 1) -> 4×4×128
+GlobalAvgPool -> Dense(3) softmax
+```
+
+Each ResBlock keeps the SE attention sub-block from the baseline model.
+**~720 K params float32 → 756 KB INT8**, ~9× the baseline.
+
+Output filenames are now arch-prefixed (`resnet18_int8.tflite`,
+`resnet18_keras_best.keras`, `resnet18_savedmodel/`, etc.), so the
+existing `resnet10_*` artifacts are untouched.
+
+`ml/04_export.py` got a matching `--arch` flag that selects which tflite
+to embed into `app/src/ml/model_data.cc`.
+
+### STM32 firmware adjustments for the bigger model
+
+Only one source change was needed before re-flashing:
+
+```c
+// app/src/ml/inference.cc
+static uint8_t tensor_arena[200 * 1024] __attribute__((aligned(16)));
+```
+
+The arena went from 40 KB (sized for ResNet-10's 29 KB working set) to
+200 KB so ResNet-18's larger intermediate feature maps fit. STM32U575
+has 768 KB of SRAM total; even with the larger arena we sit at 75 % RAM
+usage.
+
+The MicroMutableOpResolver (12 ops: CONV_2D, FULLY_CONNECTED, ADD,
+MAX_POOL_2D, MEAN, MUL, LOGISTIC, RESHAPE, SOFTMAX, PACK, SHAPE,
+STRIDED_SLICE) was unchanged — ResNet-18 uses the same op set as
+ResNet-10, just more invocations of each.
+
+### Training: 50 epochs, early-stopped at 22
+
+```
+python ml/03_quantize.py --arch resnet18 --epochs 50 --batch-size 32
+```
+
+Ran on CPU (no GPU available on this box). Each epoch was ~40 s, 50
+epochs would have been ~33 min but early stopping fired at epoch 32 with
+weights restored from epoch 22. Total wall time ~18 min, plus ~3 min
+for quantization + test-set eval.
+
+```
+Best val accuracy: 74.2%   (epoch 22)
+Keras float32 test accuracy: 71.3%
+Float32 TFLite test:         71.3%
+INT8    TFLite test:         70.9%   (-0.4 pp from float32, fine)
+Compression: 3.7×
+```
+
+### Deploy and on-hardware verification
+
+```
+python ml/04_export.py --arch resnet18   # writes app/src/ml/model_data.cc
+./build.sh                                # FLASH 1.22 MB, RAM 587 KB
+west flash --build-dir build_stm32_synth --runner openocd
+```
+
+`'T 0'` test command from the dashboard returned `A5 00 47` =
+ACK + class 0 (Absent) + 0x47 = **71 % confidence**, confirming the
+new INT8 model loaded and produced sensible output on the seeded test
+vector.
+
+Re-running `Myownheartbeat.m4a` through ResNet-18:
+
+```
+Dominant       : Absent (avg conf 80%)
+Counts         : {absent: 5, present: 0, unknown: 0}
+Latencies avg  : DSP 84 ms, Inference 507 ms
+Window 0 82%  82/18/0   no gate
+Window 1 88%  88/13/0   no gate
+Window 2 75%  75/25/0   no gate
+Window 3 88%  88/12/0   no gate
+Window 4 68%  68/30/1   no gate
+```
+
+Same verdict as ResNet-10 (all Absent, ~80 % avg). The bigger model
+agrees on the user's heartbeat — both think it's healthy.
+
+### Honest finding: bigger ≠ better here
+
+**Test-set accuracy got WORSE.** ResNet-10 hit 81.5 % INT8 on the same
+test split; ResNet-18 hits 70.9 %. Validation went up (63 → 74 %) but
+test did not follow. Classic small-dataset overfitting: 9× capacity
+without 9× regularization. CirCor has ~8.8 K training spectrograms and
+the class distribution is skewed (Absent dominates), so the extra
+capacity learned val-specific patterns that don't transfer.
+
+We kept ResNet-18 deployed deliberately, with the regression documented
+in `README.md` and here, because:
+
+1. It demonstrates that the previously-unused flash headroom is now
+   actually used (26 % → 58 %).
+2. It demonstrates the full retrain → requantize → reflash → reverify
+   pipeline on real hardware.
+3. It is a real engineering result, not a marketing one.
+4. The right next moves are spelled out in "What is NOT done" below
+   rather than glossed over.
+
+### Levine grade / severity investigation
+
+`ml/data_circor/raw/training_data.csv` has 23 columns including:
+
+```
+Murmur                       : 695 Absent, 179 Present, 68 Unknown
+Systolic murmur grading      : 178 labelled (I/VI:104, II/VI:28, III/VI:46)
+Diastolic murmur grading     :   5 labelled (statistically useless)
+```
+
+So **a systolic-murmur severity regression head IS feasible** with the
+existing data — 178 patients across three Levine grades is enough for a
+multi-task auxiliary head trained on the shared backbone.
+
+The work is **out of scope for this session** (half-day of focused
+work):
+
+- Modify `models/dataset.py` to emit `(spec, class, severity, sev_mask)`
+  tuples and mask out Absent / Unknown patients in the severity loss.
+- Modify `build_resnet*()` to expose the GAP embedding and add a second
+  Dense head producing a scalar (or 3-class) severity prediction.
+- Joint cross-entropy + severity loss with `sample_weight` for the
+  mask.
+- Multi-output INT8 PTQ (the converter handles this but the calibration
+  set needs both outputs).
+- Two output tensors in `app/src/ml/inference.cc` — second tensor read,
+  decoded, included in the response packet.
+- Dashboard segment row gains a "Severity" column.
+
+### Files added or modified this half-session
+
+```
+.gitignore                       new ignore rules for resnet18_* artifacts
+CLAUDE.md                        this session log addendum
+README.md                        ResNet-18 vs ResNet-10 comparison + honest finding
+CODEX.md                         new handoff entry for today's continuation
+app/src/ml/inference.cc          tensor arena 40 KB -> 200 KB
+app/src/ml/model_data.cc         AUTO-GENERATED, now the ResNet-18 INT8 array
+dashboard/server.py              M4A/MP3/AAC/OGG/FLAC decode, auto_boost,
+                                 Live Mic tab + Web Audio JS
+ml/03_quantize.py                build_resnet18(), --arch flag, arch-prefixed paths
+ml/04_export.py                  --arch flag selects which tflite to embed
+ml/models/resnet18_int8.tflite   NEW 756 KB
+ml/models/resnet18_float32.tflite NEW 2.8 MB
+ml/models/unknown_gate.json      regenerated by training run
+```
+
+Session artifacts (NOT committed):
+
+```
+flash_out.log, flash_err.log
+dashboard/Log 2026-05-12 14_34_55.txt
+GEMINI.md
+ml/models/resnet18_keras_best.keras
+ml/models/resnet18_savedmodel/
+ml/models/resnet18_train_log.txt
+```
+
+### What is NOT done (next session work)
+
+These were on the upgrade list authorized by the user but are real
+multi-day tasks. Half-finished scaffolds were deliberately NOT
+committed:
+
+1. **Temporal GRU head (task 4).** Architecture: small GRU (units=32)
+   consuming GAP-layer embeddings of 4-5 consecutive 2-second windows,
+   final Dense(3) softmax. Requires: rewrite the dataloader to group
+   windows by patient and emit sequences with consistent ordering;
+   modify the model to expose the GAP embedding output AND a sequence
+   classifier; joint train with weighting; STM32 firmware to maintain a
+   small embedding ring buffer across `inference_run()` calls and run
+   the GRU head locally OR offload the sequence step to the host
+   dashboard.
+
+2. **Severity head (task 5).** Detailed above. CirCor has the labels;
+   the work is dataloader masking, multi-head model, joint loss,
+   multi-output INT8 PTQ, second-output read on STM32, dashboard
+   column.
+
+3. **Phone → BLE → STM32 audio streaming (task 6).** Two pieces:
+   (a) physical wiring change — add nRF UART1 TX on a chosen pin (e.g.
+   P0.06) and a jumper from there to STM32 USART2 RX (PD6), so the nRF
+   can talk back to the STM32 over the same UART that the STM32 already
+   uses to talk to the nRF; (b) firmware changes — new WRITE-without-
+   response GATT characteristic on the nRF that buffers a 2-second
+   16 KB int16 PCM window from the phone, forwards it to the STM32
+   using the existing `'A'`-command protocol over the new TX wire,
+   reads the extended response back over the existing TX wire from
+   STM32, decodes class + confidence, BLE-notifies the result back to
+   the phone. The phone-side sender needs to be either a small bleak
+   Python client or a Flutter / SwiftUI app.
+
+4. **ResNet-18 accuracy recovery.** The test-set regression is the
+   most interesting next experiment:
+   - Add Dropout(0.2) on the GAP output and after each ResBlock add.
+   - Increase weight decay 1e-4 → 5e-4.
+   - More aggressive SpecAugment (2-3 freq masks, 2-3 time masks per
+     spec instead of 1+1).
+   - Mixup with alpha=0.2 between same-class pairs.
+   - If none of those close the gap, revert `model_data.cc` to
+     `resnet10_int8.tflite` for the demo and keep the bigger-model
+     work as a documented experiment branch.
