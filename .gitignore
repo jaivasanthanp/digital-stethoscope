@@ -15,10 +15,13 @@ ml/data_circor/
 # Large training artifacts — model_data.cc + .tflite files are checked in
 ml/models/*.h5
 ml/models/keras_best.keras
+ml/models/*_keras_best.keras
 ml/models/resnet10_savedmodel/
+ml/models/resnet18_savedmodel/
 ml/models/checkpoints/
 ml/models/quantize_log.txt
 ml/models/train_log.txt
+ml/models/*_train_log.txt
 
 # Editor / OS
 .vscode/

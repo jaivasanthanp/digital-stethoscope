@@ -19,7 +19,18 @@
 > binary packet to a short printable ASCII string (e.g. `"Present 95%"`) so
 > nRF Connect renders each notification as readable text, and the
 > characteristic now advertises a User Description ("Heart Sound
-> Classification"). See **Session Log — 2026-05-12** at the bottom.
+> Classification").
+>
+> **2026-05-12 (later) — ResNet-18 + M4A + live mic**: Dashboard now decodes
+> M4A / MP3 / AAC / OGG / FLAC via a bundled `imageio-ffmpeg` binary and has
+> a new **Live Mic** tab that captures from the laptop microphone via the
+> Web Audio API. The STM32 was reflashed with a bigger **ResNet-18** model
+> (720 K params, 756 KB INT8, ~507 ms inference, 200 KB tensor arena). It
+> uses 58 % of the 2 MB flash and 75 % of RAM, demonstrating the previously
+> unused headroom. Honest finding kept in the repo: ResNet-18's test
+> accuracy is ~10 pp lower than ResNet-10's (70.9 % vs 81.5 %) because
+> CirCor is too small to support the extra capacity without stronger
+> regularization. See **Session Log — 2026-05-12** at the bottom.
 
 ## Project Identity
 

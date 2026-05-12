@@ -4,17 +4,5 @@
   "top_prob_max": 0.6,
   "top2_margin_max": 0.41,
   "calibrated_on": "CirCor validation split",
-  "validation_baseline": {
-    "accuracy": 0.8327,
-    "balanced_accuracy": 0.5575
-  },
-  "validation_with_gate": {
-    "accuracy": 0.7631,
-    "balanced_accuracy": 0.6330
-  },
-  "test_with_gate": {
-    "accuracy": 0.7319,
-    "balanced_accuracy": 0.5956,
-    "unknown_recall": 0.568
-  }
+  "goal": "increase Unknown recall for advisory uncertainty handling"
 }

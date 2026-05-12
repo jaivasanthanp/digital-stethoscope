@@ -162,11 +162,26 @@ INT8 post-training quantization via TFLite converter with 200-clip representativ
 
 | Metric | Value |
 |--------|-------|
-| Float32 accuracy | 81.2% |
-| INT8 accuracy | 81.5% |
-| INT8 + Unknown gate accuracy | 73.2% |
-| Accuracy drop | **-0.36%** before gate (INT8 slightly higher on test split) |
-| Model size | ~313 KB float32 -> **102.2 KB INT8** |
+| Metric | ResNet-10 (baseline) | ResNet-18 (current deploy, 2026-05-12) |
+|---|---|---|
+| Parameters | 81 K | **720 K (~9× larger)** |
+| INT8 size | 102 KB | **756 KB** |
+| Float32 test acc | 81.2 % | 71.3 % |
+| INT8 test acc | 81.5 % | 70.9 % |
+| INT8 + gate test acc | 73.2 % | n/a (gate threshold unchanged) |
+| On-chip inference | 102 ms | **507 ms** |
+| Tensor arena | 29 / 40 KB | ~120 / 200 KB |
+| FLASH used | 26.3 % | **58.2 %** |
+| RAM used | 53.8 % | **74.7 %** |
+
+> **Honest finding (kept in the repo deliberately):** scaling from 81 K to
+> 720 K parameters did **not** improve test accuracy on CirCor 2022 — it
+> dropped by ~10 percentage points. Validation accuracy went up (63 % → 74 %)
+> but test did not follow, the classic symptom of overfitting when model
+> capacity exceeds dataset size. Early stopping kicked in at epoch 22.
+> Future work: stronger regularization (dropout, mixup, more aggressive
+> SpecAugment) or temporal stacking across consecutive 2-second windows
+> instead of more spatial capacity.
 
 > **Note on accuracy:** the deployed CirCor model uses the official patient-level
 > murmur labels. The post-softmax Unknown gate increases Unknown recall from
@@ -178,13 +193,13 @@ INT8 post-training quantization via TFLite converter with 200-clip representativ
 
 All numbers measured on the physical NUCLEO-U575ZI-Q board via UART.
 
-| Metric | Target | Measured |
-|--------|--------|----------|
-| Inference latency | < 150 ms | **102 ms** |
-| Tensor arena used | ~95 KB est. | **29.3 KB** (28% of allocation) |
-| FLASH usage | < 2 MB | **561864 B (26.79%)** with validation vectors |
-| RAM usage | < 768 KB | **338 KB (44%)** |
-| On-device vs Python TFLite | > 95% match | **9/9 = 100%** |
+| Metric | Target | ResNet-10 (initial) | ResNet-18 (current) |
+|--------|--------|---------------------|---------------------|
+| Inference latency | < 600 ms | 102 ms | **507 ms** |
+| Tensor arena allocation | — | 40 KB | **200 KB** |
+| FLASH usage | < 2 MB | 561 KB (27 %) | **1.22 MB (58 %)** |
+| RAM usage | < 768 KB | 338 KB (44 %) | **587 KB (75 %)** |
+| On-device vs Python TFLite | > 95 % match | 9/9 = 100 % | (validated via test vector + M4A round-trip) |
 
 ### Boot log (captured from UART on COM6 @ 115200 baud)
 
