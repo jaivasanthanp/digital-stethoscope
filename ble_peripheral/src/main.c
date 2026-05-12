@@ -13,6 +13,7 @@
 #include <zephyr/logging/log.h>
 
 #include "heart_sound_service.h"
+#include "audio_input_service.h"
 
 LOG_MODULE_REGISTER(ble_main, LOG_LEVEL_INF);
 
@@ -119,6 +120,7 @@ int main(void)
     }
 
     hsc_service_init();
+    audio_input_service_init(uart_dev);
 
     err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
     if (err) {

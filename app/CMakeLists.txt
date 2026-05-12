@@ -19,10 +19,12 @@ target_sources(app PRIVATE
 )
 
 # TFLite Micro inference wrapper (C++ file) + on-device validation
+# + USART2 audio bridge for phone -> BLE -> nRF -> STM32 path
 target_sources(app PRIVATE
     src/ml/inference.cc
     src/ml/model_data.cc
     src/ml/validate.c
+    src/ml/audio_bridge.c
 )
 
 # BLE/UART communication to nRF52840

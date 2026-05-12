@@ -22,6 +22,7 @@
 #include "dsp/mel_spec.h"
 #include "ml/inference.h"
 #include "ml/validate.h"
+#include "ml/audio_bridge.h"
 #include "comms/ble_client.h"
 
 LOG_MODULE_REGISTER(main, LOG_LEVEL_INF);
@@ -213,6 +214,12 @@ int main(void)
                     validate_thread_fn, NULL, NULL, NULL,
                     9, 0, K_NO_WAIT);
     k_thread_name_set(&validate_thread_data, "validate");
+
+    /* Audio bridge: listens on USART2 RX (PD6) for 'B' + 16 KB int16 PCM
+     * forwarded by the nRF52840 from the phone's BLE audio_input write
+     * characteristic. Runs the same DSP + inference path and returns the
+     * result via ble_client_send() over USART2 TX (PD5). */
+    audio_bridge_init();
 
     return 0;
 }
