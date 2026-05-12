@@ -1,6 +1,75 @@
 # Digital Stethoscope (v2 / CirCor 2022) — Session Handoff
 
-Last updated: 2026-05-12 (Claude session, phone -> BLE -> STM32 audio streaming verified)
+Last updated: 2026-05-12 (Claude session, Web Bluetooth phone client live + BLE auto-recover)
+
+## End-of-day (2026-05-12, fourth handoff) — Web Bluetooth phone client + BLE fixes
+
+After the bleak validator proved the firmware path works end-to-end, the
+project shipped a phone-side client and hardened the BLE stack against
+the common failure modes that came up in real-world use.
+
+### What landed since the third handoff (the BLE-audio-streaming one)
+
+1. **Web Bluetooth phone client (`docs/index.html`)**: single 16 KB
+   HTML page that, opened in Chrome on Android, captures phone mic →
+   downsamples to 4 kHz → connects to nRF52840 via Web Bluetooth →
+   streams int16 PCM windows to the audio-in characteristic →
+   subscribes to the classification characteristic and renders each
+   inbound ASCII notification as a big "Absent NN%" card. Deployed via
+   GitHub Pages from `docs/` (HTTPS required for Web Bluetooth, GH
+   Pages provides it). Local desktop testing is `python -m http.server
+   -d docs 8080`; phones need the GH Pages URL.
+
+2. **nRF auto-restarts advertising on disconnect**. Previous firmware
+   called `bt_le_adv_start()` synchronously in the disconnect callback,
+   which sometimes lost the race with the controller's connection
+   teardown and left the peripheral silent until a manual J-Link reset.
+   New behaviour: a `k_work_delayable adv_work` retries every 500 ms on
+   `-ENOMEM` / `-EINVAL`, no-ops on `-EALREADY`, and is also used for
+   the initial boot-time advertising start.
+
+3. **Merged BLE characteristics into one GATT service.** The firmware
+   used to have TWO `BT_GATT_SERVICE_DEFINE` blocks (one per
+   characteristic) both declaring the same service UUID `...ABC`. BLE
+   treats these as two distinct primary services. Web Bluetooth's
+   `getPrimaryService(uuid)` returns only the FIRST, so the audio-in
+   characteristic in the second one was unreachable. bleak worked
+   because its characteristic lookup walks all services. Fix: single
+   `BT_GATT_SERVICE_DEFINE` in `heart_sound_service.c` declares both
+   characteristics. `audio_input_service.c` keeps the accumulator +
+   forward worker logic and exposes the write handler via its header.
+
+### Verification done after the fixes
+
+- `bleak` introspection on the live nRF reports BOTH `...ABD` and
+  `...ABE` characteristics under the same primary service `...ABC`
+  instance.
+- bleak end-to-end audio streaming on the user's `Myownheartbeat.m4a`
+  still returns the same four BLE notifications: `Absent 82%`,
+  `Absent 88%`, `Absent 75%`, `Absent 88%`.
+- bleak disconnect → 2 s wait → scan → `HeartSound` rediscovered with no
+  J-Link reset, confirming the auto-restart loop.
+
+### nRF / STM32 footprint after this segment
+
+- nRF: FLASH 126.0 KB / 1 MB (12.0 %), RAM 62 KB / 256 KB (24 %).
+- STM32 unchanged from the BLE-audio segment: FLASH 1.22 MB / 2 MB
+  (58.2 %), RAM 658 KB / 768 KB (83.7 %).
+
+### Two operational caveats that users (and future-me) need to know
+
+1. **BLE peripherals are 1-to-1.** If nRF Connect (or any other BLE
+   central) is connected to `HeartSound`, the Web Bluetooth chooser
+   cannot find it — the device is not advertising while connected. The
+   page now displays a callout under the Connect button.
+
+2. **Android caches GATT service definitions across reconnects.** After
+   the merged-service reflash, the cached service list on the phone
+   still shows the broken split version, and Web Bluetooth's strict
+   per-service characteristic search fails. Fix: in Android *Settings →
+   Bluetooth*, tap the gear icon next to `HeartSound` and choose
+   *Forget device*. Reload the web page and reconnect — Android does a
+   fresh service discovery.
 
 ## End-of-day (2026-05-12, third handoff) — BLE audio streaming end-to-end
 

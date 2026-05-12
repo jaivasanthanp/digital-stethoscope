@@ -1622,3 +1622,149 @@ PHY to bring this under 1 s round trip.
 - `ml/06_validate_ble_audio.py` requires `pip install bleak
   imageio-ffmpeg soundfile`. It works on Windows 10/11 via the native
   WinRT BLE stack.
+
+---
+
+## Session Log — 2026-05-12 (extra: Web Bluetooth client + two BLE-stack fixes)
+
+After the bleak validator was solid, the focus moved to a true
+phone-as-stethoscope demo without any toolchain install.
+
+### Web Bluetooth phone client (task 6a)
+
+Original plan was a Flutter Android app (~1-2 days, 3-5 GB toolchain).
+Web Bluetooth gets the same end-to-end demo for a single 16 KB
+self-contained HTML page that anyone with a recent Android Chrome can
+open. Trade-off: iOS Safari does not implement Web Bluetooth (Bluefy
+works as a fallback), and Firefox declines to ship it.
+
+`docs/index.html`:
+- Phone mic captured via `getUserMedia({audio: {channelCount: 1,
+  echoCancellation: false, noiseSuppression: false,
+  autoGainControl: false}})` + `AudioContext` + `ScriptProcessor(4096)`.
+- 2-second buffer at the device's native rate (44.1 or 48 kHz),
+  linear-downsampled to 4 kHz, converted to int16 LE, peak-normalised if
+  quiet.
+- `navigator.bluetooth.requestDevice({filters:[{name:"HeartSound"}],
+  optionalServices:[SERVICE_UUID]})` triggers the system device chooser.
+- `getPrimaryService(...abc).getCharacteristic(...abe)` on connect,
+  `writeValueWithoutResponse()` in 180-byte chunks per window
+  (safe under any negotiated ATT MTU).
+- `getCharacteristic(...abd).startNotifications()` for inbound
+  classification strings; rendered as a big class-name card + history
+  list.
+
+Hosting: `docs/index.html` is meant for GitHub Pages from
+`<branch>/docs`. Web Bluetooth requires HTTPS, which GH Pages gives for
+free. URL once Pages is enabled:
+`https://jaivasanthanp.github.io/digital-stethoscope/`. For local
+desktop testing on a laptop with a BLE radio, `python -m http.server -d
+docs 8080` then `http://localhost:8080` works (Web Bluetooth allows
+`localhost` over HTTP).
+
+### Fix #1 — auto-restart advertising on disconnect
+
+Symptom: after a phone-side disconnect (clean or abrupt), the nRF would
+sometimes stop appearing in BLE scans until manually reset via J-Link.
+
+Cause: the disconnected() callback in `ble_peripheral/src/main.c` called
+`bt_le_adv_start()` synchronously inside the BT host callback. That can
+race with the controller still tearing down the previous connection and
+return `-EALREADY` / `-ENOMEM`, after which the peripheral stays silent
+indefinitely.
+
+Fix:
+- New `struct k_work_delayable adv_work` + `adv_work_handler()` that
+  retries `bt_le_adv_start` every 500 ms on transient failures and
+  silently no-ops on `-EALREADY`.
+- disconnected() and a failed connected() both schedule `adv_work`
+  with a 100 ms initial delay so the controller has time to release
+  the connection slot.
+- main() also goes through `adv_work` for the initial start, so one
+  code path owns the advertising lifecycle.
+
+Verified via a bleak script that connects, disconnects, waits 2 s,
+re-scans — and finds `HeartSound` again with no manual reset.
+
+### Fix #2 — merge both characteristics into one GATT service
+
+Symptom: bleak streaming worked, but the Web Bluetooth client returned
+`"no characteristics matching UUID 12345678...abe"` after a successful
+connect.
+
+Cause: the firmware previously had TWO `BT_GATT_SERVICE_DEFINE` blocks,
+both declaring the same service UUID `...ABC`. BLE / GATT treats these
+as two distinct primary service instances. Web Bluetooth's
+`getPrimaryService(uuid)` only returns the FIRST instance — which
+contained only the classification char `...ABD`. The audio-in char
+`...ABE` lived in the SECOND instance and was unreachable through Web
+Bluetooth's strict API. `bleak` happened to work because its
+characteristic lookup walks all services rather than scoping to one.
+
+Fix: collapse to ONE `BT_GATT_SERVICE_DEFINE` in
+`heart_sound_service.c` that declares both characteristics inside the
+single primary service handle. `audio_input_service.c` lost its
+`BT_GATT_SERVICE_DEFINE` block and now only contributes the
+accumulator + UART forward worker + a forward-declared write handler
+via `audio_input_service.h`.
+
+Verified after reflash that bleak introspection shows BOTH `...ABD`
+and `...ABE` inside the same service ABC instance, and the audio
+streaming test still produces 4/4 BLE notifications on the user's
+`Myownheartbeat.m4a` (`Absent 82/88/75/88 %`, unchanged).
+
+### Phone-side cache caveat (documented in `docs/index.html`)
+
+After the merged-service reflash, Android may still hold the cached
+broken-split service list from the previous firmware. Fix: in Android
+*Settings → Bluetooth*, tap the gear next to `HeartSound` and choose
+*Forget device*. Then reload the web page and reconnect — Android does
+fresh service discovery.
+
+### BLE 1-to-1 caveat (also documented)
+
+A BLE peripheral can only be connected to ONE central at a time. If
+the user has nRF Connect connected, the Web Bluetooth chooser cannot
+see `HeartSound` (it is not advertising while connected). This is a
+fundamental BLE limit, not fixable in firmware. The Web Bluetooth page
+now displays a callout under the Connect button.
+
+### Files added / modified in this segment
+
+```
+ble_peripheral/src/main.c                + adv_work_delayable + retry-on-fail
+ble_peripheral/src/heart_sound_service.c merged BT_GATT_SERVICE_DEFINE
+                                         (both characteristics + CCC + 2 CUDs)
+ble_peripheral/src/audio_input_service.c removed BT_GATT_SERVICE_DEFINE
+                                         (logic-only: accumulator + work)
+ble_peripheral/src/audio_input_service.h exports audio_input_write
+                                         prototype for cross-file use
+docs/index.html                          NEW — 16 KB self-contained
+                                         Web Bluetooth + Web Audio page,
+                                         result card UI, history, two
+                                         expandable info / troubleshoot
+                                         panels, mobile-first CSS
+docs/README.md                           NEW — how to enable GH Pages
+                                         in 60 s, browser compat, local
+                                         testing path, troubleshooting
+README.md                                project lede now lists FIVE
+                                         audio sources (file / live laptop
+                                         mic / wireless phone / BLE from
+                                         laptop / synthetic), wiring
+                                         section, status table tasks 7
+                                         and 7a Done
+```
+
+### Final task list at end of this session
+
+| # | Task | Status |
+|---|---|---|
+| 1 | M4A dashboard upload | Done |
+| 2 | Live laptop-mic dashboard tab | Done |
+| 3 | ResNet-18 deployed | Done |
+| 4 | Temporal GRU head | Deferred |
+| 5 | Severity head (Levine grade) | Investigated; implementation deferred |
+| 6 | Phone → BLE → STM32 firmware + bleak validator | Done |
+| 7 | Web Bluetooth phone client | Done |
+| (8) | nRF auto-restart advertising on disconnect | Done (this segment) |
+| (9) | Single primary GATT service (Web Bluetooth fix) | Done (this segment) |
