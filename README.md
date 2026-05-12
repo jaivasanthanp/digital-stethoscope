@@ -13,12 +13,16 @@ on the same on-chip DSP + INT8 CNN inference path on the STM32U575:
 2. **Live laptop microphone** — browser Web Audio API captures from the
    default mic, downsamples to 4 kHz, ships each 2-second window to the
    STM32 in real time.
-3. **Wireless BLE audio streaming** — any BLE central (`bleak` Python
-   script or a phone app) writes int16 PCM windows to the nRF52840 DK's
-   AudioIn characteristic. The nRF buffers, forwards to STM32 over UART,
-   and the classification is BLE-notified back. Verified end-to-end with
-   `ml/06_validate_ble_audio.py`.
-4. **Synthetic PCG self-test** — on-chip 4 kHz audio rendered from a tiny
+3. **Wireless phone-as-stethoscope** — open
+   [`docs/index.html`](docs/) (live URL once GitHub Pages is on:
+   `https://jaivasanthanp.github.io/digital-stethoscope/`) on Chrome on
+   Android. The phone mic captures audio, **Web Bluetooth** writes int16
+   PCM windows directly to the nRF52840 DK's AudioIn GATT
+   characteristic, and the classification is BLE-notified back to the
+   phone in readable text. No app install, no laptop in the loop.
+4. **BLE streaming from a laptop** — same GATT protocol, driven by
+   `ml/06_validate_ble_audio.py` for development / regression testing.
+5. **Synthetic PCG self-test** — on-chip 4 kHz audio rendered from a tiny
    script, kept around for hardware-without-host demos (`'S'` / `'P'`
    commands on UART).
 
@@ -494,7 +498,8 @@ window emits one notification on the phone, ~3 s apart.
 | 6c | **Bigger CNN deployment — ResNet-18, 720 K params, 756 KB INT8 on STM32** | **Done (2026-05-12)** |
 | 6d | Levine grade / severity head — dataset investigation | Done; implementation deferred |
 | 7  | **Phone → BLE → STM32 audio streaming (firmware + Python validator)** | **Done (2026-05-12)** |
-| 7a | Flutter Android app for the audio streaming path | Pending — firmware ready, app is the remaining work |
+| 7a | **Web Bluetooth phone client (Chrome on Android, single HTML page)** | **Done (2026-05-12)** |
+| 7b | Flutter Android app | Optional — Web Bluetooth covers the demo |
 | 8a | Temporal GRU head over consecutive windows | Deferred — multi-day rewrite |
 | 8b | ResNet-18 accuracy recovery (dropout / mixup / stronger SpecAugment) | Deferred — single experiment |
 | 8c | Levine grade severity head implementation | Deferred — half-day of focused work |

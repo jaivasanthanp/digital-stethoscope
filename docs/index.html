@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#1f4e79" />
+  <title>Digital Stethoscope — Phone Client</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: linear-gradient(180deg, #f4f6fa 0%, #e9edf3 100%);
+      color: #1d2433;
+      padding: 16px;
+      max-width: 480px;
+      margin: 0 auto;
+    }
+    h1 { font-size: 22px; margin: 8px 0 4px; color: #1f4e79; }
+    .sub { font-size: 13px; color: #5b6477; margin-bottom: 16px; }
+
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 14px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.04);
+    }
+
+    button {
+      width: 100%;
+      padding: 14px 18px;
+      font-size: 16px;
+      font-weight: 600;
+      border: 0;
+      border-radius: 10px;
+      cursor: pointer;
+      letter-spacing: 0.2px;
+    }
+    button.primary { background: #1f4e79; color: white; }
+    button.primary:disabled { background: #b6c2d3; cursor: not-allowed; }
+    button.secondary { background: #e1e7ef; color: #1d2433; margin-top: 8px; }
+    button.danger { background: #c0392b; color: white; }
+
+    .status {
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 12px; border-radius: 8px;
+      background: #eef2f7; font-size: 14px;
+    }
+    .status .dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: #b6c2d3;
+    }
+    .status.connected .dot { background: #2e8b57; }
+    .status.streaming  .dot { background: #e67e22; animation: pulse 1.2s ease-in-out infinite; }
+    .status.error      .dot { background: #c0392b; }
+    @keyframes pulse { 0%,100% {opacity:1;} 50% {opacity:0.35;} }
+
+    .result {
+      text-align: center;
+      padding: 20px 12px;
+    }
+    .result .class-name {
+      font-size: 42px; font-weight: 800; letter-spacing: -0.5px;
+      line-height: 1.0; margin-bottom: 4px;
+    }
+    .result .confidence { font-size: 18px; color: #5b6477; }
+    .result.absent  .class-name { color: #2e8b57; }
+    .result.present .class-name { color: #c0392b; }
+    .result.unknown .class-name { color: #d68910; }
+
+    .meta { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 12px; font-size: 12px; color: #5b6477; }
+    .meta strong { color: #1d2433; display: block; font-size: 14px; font-weight: 600; }
+
+    ul.history {
+      list-style: none; padding: 0; margin: 0;
+      max-height: 220px; overflow-y: auto;
+      font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      font-size: 12px;
+    }
+    ul.history li {
+      padding: 6px 10px; border-bottom: 1px solid #edf0f5;
+      display: flex; justify-content: space-between; gap: 10px;
+    }
+    ul.history li:last-child { border-bottom: 0; }
+    ul.history .t { color: #5b6477; }
+    ul.history .v { font-weight: 600; }
+
+    details { font-size: 12px; color: #5b6477; margin-top: 8px; }
+    details summary { cursor: pointer; color: #1f4e79; }
+    code { background: #eef2f7; padding: 1px 4px; border-radius: 3px; }
+    .small { font-size: 12px; color: #5b6477; }
+    .err   { color: #c0392b; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Digital Stethoscope</h1>
+  <div class="sub">Phone mic &rarr; BLE &rarr; nRF52840 &rarr; STM32 &rarr; classification &rarr; back to your phone</div>
+
+  <div class="card">
+    <button id="btnConnect" class="primary">Connect to HeartSound</button>
+    <button id="btnDisconnect" class="secondary" disabled>Disconnect</button>
+    <div id="statusRow" class="status" style="margin-top:12px;">
+      <span class="dot"></span><span id="statusText">Idle</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <button id="btnStream" class="primary" disabled>Start streaming mic</button>
+    <button id="btnStop"   class="danger"  disabled style="margin-top:8px;">Stop</button>
+    <div class="small" id="streamInfo" style="margin-top:8px;">Mic stays muted until connected. Audio is downsampled to 4 kHz on the phone and sent over BLE as int16 PCM, 2-second windows.</div>
+  </div>
+
+  <div class="card">
+    <div class="small" style="margin-bottom:6px;">Latest classification</div>
+    <div id="result" class="result"><div class="class-name">—</div><div class="confidence">no data</div></div>
+    <div class="meta">
+      <div><strong id="metaSegments">0</strong>windows classified</div>
+      <div><strong id="metaUptime">0 s</strong>connected</div>
+      <div><strong id="metaSr">—</strong>native mic rate</div>
+      <div><strong id="metaMtu">—</strong>chunk size</div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="small" style="margin-bottom:6px;">History</div>
+    <ul id="history" class="history"></ul>
+  </div>
+
+  <div class="card">
+    <details>
+      <summary>How this works (and limits)</summary>
+      <p>This page uses two web APIs that Chrome on Android (≥ 56) supports:
+      <strong>Web Audio</strong> for the mic, <strong>Web Bluetooth</strong> for the
+      GATT connection to the nRF52840 DK. The whole flow runs locally on your phone —
+      nothing is uploaded to a server. iOS Safari does <em>not</em> support Web Bluetooth;
+      use Bluefy or a Bluetooth-enabled browser on iOS, or stick to Android Chrome.</p>
+      <p>The phone writes int16 PCM windows to characteristic
+      <code>12345678-1234-1234-1234-123456789ABE</code> on the
+      <code>HeartSound</code> peripheral. Classifications come back as
+      ASCII notifications on
+      <code>12345678-1234-1234-1234-123456789ABD</code>.</p>
+      <p id="errBox" class="err"></p>
+    </details>
+  </div>
+
+<script>
+const SERVICE_UUID = "12345678-1234-1234-1234-123456789abc";
+const RESULT_UUID  = "12345678-1234-1234-1234-123456789abd";
+const AUDIO_UUID   = "12345678-1234-1234-1234-123456789abe";
+
+const WINDOW_SAMPLES = 8000;             // 2 s @ 4 kHz
+const WINDOW_BYTES   = WINDOW_SAMPLES * 2;
+const TARGET_SR      = 4000;
+const CHUNK_BYTES    = 180;              // safely under any ATT MTU - 3
+
+const $ = (id) => document.getElementById(id);
+
+let bleDevice = null;
+let bleServer = null;
+let audioChar = null;
+let resultChar = null;
+let connectedAt = 0;
+let uptimeTimer = null;
+
+let audioCtx = null;
+let mediaStream = null;
+let processor = null;
+let nativeSR = 0;
+let bufferChunks = [];
+let bufferSamples = 0;
+let writingWindow = false;
+let pendingWindow = null;
+let segmentCount = 0;
+
+const $errBox = $("errBox");
+
+function setStatus(state, msg) {
+  $("statusText").textContent = msg;
+  $("statusRow").classList.remove("connected","streaming","error","idle");
+  $("statusRow").classList.add(state);
+}
+
+function setError(msg) {
+  $errBox.textContent = msg;
+  setStatus("error", msg);
+}
+
+function clearError() { $errBox.textContent = ""; }
+
+function logEvent(text, value) {
+  const li = document.createElement("li");
+  const t = new Date();
+  const stamp = `${t.getHours().toString().padStart(2,"0")}:`
+              + `${t.getMinutes().toString().padStart(2,"0")}:`
+              + `${t.getSeconds().toString().padStart(2,"0")}`;
+  li.innerHTML = `<span class="t">${stamp}</span><span class="v">${value || text}</span>`;
+  const h = $("history");
+  h.insertBefore(li, h.firstChild);
+  while (h.children.length > 24) h.removeChild(h.lastChild);
+}
+
+function setResult(text) {
+  // Expected payload: "Absent NN%", "Present NN%", "Unknown NN%", "Error NN%"
+  const m = /^(\w+)\s+(\d+)\s*%$/.exec(text.trim());
+  const className = m ? m[1] : text;
+  const conf      = m ? `${m[2]}% confidence` : "";
+  const root = $("result");
+  root.className = "result " + className.toLowerCase();
+  root.innerHTML = `<div class="class-name">${className}</div><div class="confidence">${conf}</div>`;
+}
+
+// ─── Web Bluetooth ────────────────────────────────────────────────────────
+async function bleConnect() {
+  clearError();
+  if (!navigator.bluetooth) {
+    setError("Web Bluetooth not supported. Open this page in Chrome on Android (or Bluefy on iOS).");
+    return;
+  }
+  try {
+    setStatus("idle", "Choosing device…");
+    bleDevice = await navigator.bluetooth.requestDevice({
+      filters: [{ name: "HeartSound" }],
+      optionalServices: [SERVICE_UUID],
+    });
+    bleDevice.addEventListener("gattserverdisconnected", onDisconnected);
+
+    setStatus("idle", "Connecting…");
+    bleServer = await bleDevice.gatt.connect();
+    const service = await bleServer.getPrimaryService(SERVICE_UUID);
+
+    resultChar = await service.getCharacteristic(RESULT_UUID);
+    audioChar  = await service.getCharacteristic(AUDIO_UUID);
+
+    await resultChar.startNotifications();
+    resultChar.addEventListener("characteristicvaluechanged", onNotify);
+
+    connectedAt = performance.now();
+    if (uptimeTimer) clearInterval(uptimeTimer);
+    uptimeTimer = setInterval(() => {
+      const s = Math.floor((performance.now() - connectedAt) / 1000);
+      $("metaUptime").textContent = `${s} s`;
+    }, 1000);
+
+    $("btnConnect").disabled    = true;
+    $("btnDisconnect").disabled = false;
+    $("btnStream").disabled     = false;
+    setStatus("connected", `Connected to ${bleDevice.name}`);
+    logEvent("connected", "connected");
+  } catch (e) {
+    setError("BLE connect failed: " + e.message);
+  }
+}
+
+function onDisconnected() {
+  setStatus("idle", "Disconnected");
+  $("btnConnect").disabled    = false;
+  $("btnDisconnect").disabled = true;
+  $("btnStream").disabled     = true;
+  $("btnStop").disabled       = true;
+  stopStreaming();
+  if (uptimeTimer) { clearInterval(uptimeTimer); uptimeTimer = null; }
+  logEvent("disconnected", "disconnected");
+}
+
+async function bleDisconnect() {
+  if (bleDevice && bleDevice.gatt.connected) {
+    bleDevice.gatt.disconnect();
+  }
+}
+
+function onNotify(e) {
+  // Decode the ASCII payload sent by hsc_service_notify() on the nRF.
+  const buf = new Uint8Array(e.target.value.buffer);
+  let s = "";
+  for (let i = 0; i < buf.length; i++) s += String.fromCharCode(buf[i]);
+  setResult(s);
+  segmentCount++;
+  $("metaSegments").textContent = String(segmentCount);
+  logEvent("rx", s);
+}
+
+// ─── Web Audio (mic capture + downsample) ─────────────────────────────────
+function downsampleLinear(input, srIn, srOut) {
+  if (srIn === srOut) return input;
+  const ratio = srIn / srOut;
+  const outLen = Math.floor(input.length / ratio);
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) {
+    const idx = i * ratio;
+    const i0 = Math.floor(idx);
+    const i1 = Math.min(i0 + 1, input.length - 1);
+    const f  = idx - i0;
+    out[i] = input[i0] * (1 - f) + input[i1] * f;
+  }
+  return out;
+}
+
+function floatToInt16(input) {
+  const out = new Int16Array(input.length);
+  for (let i = 0; i < input.length; i++) {
+    const s = Math.max(-1, Math.min(1, input[i]));
+    out[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+  }
+  return out;
+}
+
+async function writeFullWindow(int16Window) {
+  if (!audioChar) return;
+  if (writingWindow) {
+    pendingWindow = int16Window;
+    return;
+  }
+  writingWindow = true;
+  try {
+    const bytes = new Uint8Array(int16Window.buffer, int16Window.byteOffset, int16Window.byteLength);
+    for (let off = 0; off < bytes.length; off += CHUNK_BYTES) {
+      const piece = bytes.slice(off, Math.min(off + CHUNK_BYTES, bytes.length));
+      await audioChar.writeValueWithoutResponse(piece);
+    }
+    logEvent("tx", `tx window (${bytes.length} B)`);
+  } catch (e) {
+    setError("BLE write failed: " + e.message);
+  } finally {
+    writingWindow = false;
+    if (pendingWindow) {
+      const next = pendingWindow;
+      pendingWindow = null;
+      writeFullWindow(next);  // fire-and-forget
+    }
+  }
+}
+
+async function startStreaming() {
+  clearError();
+  if (!audioChar) { setError("Connect first."); return; }
+  try {
+    mediaStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+      video: false,
+    });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    nativeSR = audioCtx.sampleRate;
+    $("metaSr").textContent = `${nativeSR} Hz`;
+    $("metaMtu").textContent = `${CHUNK_BYTES} B`;
+
+    const src = audioCtx.createMediaStreamSource(mediaStream);
+    const bufSize = 4096;
+    processor = audioCtx.createScriptProcessor(bufSize, 1, 1);
+    const windowAtNative = Math.round(nativeSR * 2.0);
+
+    bufferChunks = [];
+    bufferSamples = 0;
+    processor.onaudioprocess = (e) => {
+      const chan = e.inputBuffer.getChannelData(0);
+      const copy = new Float32Array(chan.length); copy.set(chan);
+      bufferChunks.push(copy);
+      bufferSamples += chan.length;
+      while (bufferSamples >= windowAtNative) {
+        const merged = new Float32Array(windowAtNative);
+        let pos = 0;
+        while (pos < windowAtNative && bufferChunks.length > 0) {
+          const c = bufferChunks[0];
+          const rem = windowAtNative - pos;
+          if (c.length <= rem) {
+            merged.set(c, pos); pos += c.length; bufferChunks.shift();
+          } else {
+            merged.set(c.subarray(0, rem), pos);
+            bufferChunks[0] = c.subarray(rem);
+            pos += rem;
+          }
+        }
+        bufferSamples -= windowAtNative;
+        const ds = downsampleLinear(merged, nativeSR, TARGET_SR);
+        const i16 = floatToInt16(ds);
+        // Peak-normalise quiet windows so the STM32's int16 range gets used.
+        let peak = 0;
+        for (let i = 0; i < i16.length; i++) {
+          const a = Math.abs(i16[i]);
+          if (a > peak) peak = a;
+        }
+        if (peak > 0 && peak < 0x4000) {
+          const k = 0x7000 / peak;
+          for (let i = 0; i < i16.length; i++) i16[i] = Math.max(-32768, Math.min(32767, Math.round(i16[i] * k)));
+        }
+        writeFullWindow(i16);
+      }
+    };
+    src.connect(processor);
+    const muted = audioCtx.createGain(); muted.gain.value = 0;
+    processor.connect(muted); muted.connect(audioCtx.destination);
+
+    $("btnStream").disabled = true;
+    $("btnStop").disabled   = false;
+    setStatus("streaming", `Streaming mic at ${nativeSR} Hz → 4 kHz`);
+  } catch (e) {
+    setError("Mic / streaming failed: " + e.message);
+  }
+}
+
+function stopStreaming() {
+  try { if (processor) processor.disconnect(); } catch (e) {}
+  try { if (audioCtx) audioCtx.close(); } catch (e) {}
+  if (mediaStream) mediaStream.getTracks().forEach(t => t.stop());
+  processor = null; audioCtx = null; mediaStream = null;
+  $("btnStream").disabled = !audioChar;
+  $("btnStop").disabled   = true;
+  if (bleDevice && bleDevice.gatt.connected) {
+    setStatus("connected", `Connected to ${bleDevice.name}`);
+  } else {
+    setStatus("idle", "Idle");
+  }
+}
+
+$("btnConnect")   .addEventListener("click", bleConnect);
+$("btnDisconnect").addEventListener("click", bleDisconnect);
+$("btnStream")    .addEventListener("click", startStreaming);
+$("btnStop")      .addEventListener("click", stopStreaming);
+
+setStatus("idle", "Idle. Tap Connect to choose your HeartSound device.");
+</script>
+</body>
+</html>
