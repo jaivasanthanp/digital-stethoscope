@@ -29,6 +29,7 @@ import cgi
 import io
 import json
 import struct
+import subprocess
 import tempfile
 import threading
 import time
@@ -44,6 +45,11 @@ try:
     import librosa
 except ImportError as exc:
     raise SystemExit("librosa is required. Install ml/requirements.txt first.") from exc
+
+try:
+    import soundfile as sf
+except ImportError as exc:
+    raise SystemExit("soundfile is required. Install ml/requirements.txt first.") from exc
 
 try:
     import serial
@@ -392,8 +398,8 @@ HTML = r"""<!doctype html>
     <section id="customPanel">
       <div class="label">Audio Upload</div>
       <form id="classifyForm" class="controls">
-        <label class="field">WAV / 1D NPY audio
-          <input id="audioFile" name="file" type="file" accept=".wav,.npy,audio/wav,audio/x-wav" required>
+        <label class="field">Audio file (WAV, M4A, MP3, AAC, OGG, FLAC, or 1D NPY)
+          <input id="audioFile" name="file" type="file" accept=".wav,.npy,.m4a,.m4b,.mp3,.aac,.mp4,.ogg,.oga,.flac,.webm,.opus,audio/*" required>
         </label>
         <label class="field">Ground-truth labels JSON (optional)
           <input id="labelsFile" name="labels" type="file" accept=".json,application/json">
@@ -1117,10 +1123,56 @@ def segment_audio(audio: np.ndarray) -> list[np.ndarray]:
     return windows
 
 
+_FFMPEG_EXE: str | None = None
+
+
+def _get_ffmpeg() -> str | None:
+    """Resolve a usable ffmpeg binary, preferring the bundled imageio-ffmpeg one.
+    Returns None if no decoder is available — caller should fall back gracefully.
+    """
+    global _FFMPEG_EXE
+    if _FFMPEG_EXE is not None:
+        return _FFMPEG_EXE or None
+    try:
+        import imageio_ffmpeg
+        _FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        import shutil
+        _FFMPEG_EXE = shutil.which("ffmpeg") or ""
+    return _FFMPEG_EXE or None
+
+
 def load_wav(path: Path) -> tuple[np.ndarray, float]:
     audio, _ = librosa.load(str(path), sr=SR_TARGET, mono=True)
     audio = audio.astype(np.float32)
     return audio, float(len(audio) / SR_TARGET)
+
+
+def load_compressed(path: Path) -> tuple[np.ndarray, float]:
+    """Decode any ffmpeg-supported compressed audio (M4A / AAC / MP3 / OGG /
+    FLAC / WebM / etc.) into mono float32 PCM at SR_TARGET.
+    """
+    ffmpeg = _get_ffmpeg()
+    if ffmpeg is None:
+        raise ValueError(
+            f"Cannot decode {path.suffix}: ffmpeg not available. "
+            "pip install imageio-ffmpeg"
+        )
+    proc = subprocess.run(
+        [ffmpeg, "-v", "error", "-i", str(path),
+         "-f", "wav", "-acodec", "pcm_s16le",
+         "-ac", "1", "-ar", str(SR_TARGET), "-"],
+        capture_output=True, check=False,
+    )
+    if proc.returncode != 0:
+        raise ValueError(
+            f"ffmpeg failed to decode {path.name}: {proc.stderr.decode(errors='replace')[:200]}"
+        )
+    pcm, sr = sf.read(io.BytesIO(proc.stdout), dtype="float32", always_2d=False)
+    if pcm.ndim > 1:
+        pcm = pcm.mean(axis=1)
+    pcm = pcm.astype(np.float32, copy=False)
+    return pcm, float(len(pcm) / float(sr))
 
 
 def load_npy(path: Path) -> tuple[np.ndarray, float]:
@@ -1131,13 +1183,43 @@ def load_npy(path: Path) -> tuple[np.ndarray, float]:
     return arr, float(len(arr) / SR_TARGET)
 
 
+def auto_boost(audio: np.ndarray, target_peak: float = 0.95,
+               min_peak_threshold: float = 0.5) -> np.ndarray:
+    """Peak-normalise quiet inputs (e.g. phone recordings) so the int16 cast
+    that follows uses the full dynamic range. Loud inputs are passed through
+    untouched so we don't distort recordings that already sit near full scale.
+    """
+    if audio.size == 0:
+        return audio
+    peak = float(np.max(np.abs(audio)))
+    if peak <= 0.0 or peak >= min_peak_threshold:
+        return audio
+    return (audio * (target_peak / peak)).astype(np.float32, copy=False)
+
+
+# File extensions that ffmpeg should handle. Anything not in this list or
+# WAV / NPY will be rejected by preprocess_input_file().
+COMPRESSED_SUFFIXES = {
+    ".m4a", ".m4b", ".aac", ".mp3", ".mp4", ".ogg", ".oga",
+    ".flac", ".webm", ".opus", ".wma", ".3gp",
+}
+
+
 def preprocess_input_file(path: Path) -> tuple[np.ndarray, float]:
     suffix = path.suffix.lower()
     if suffix == ".wav":
-        return load_wav(path)
-    if suffix == ".npy":
-        return load_npy(path)
-    raise ValueError("Unsupported input. Use .wav or .npy")
+        audio, duration = load_wav(path)
+    elif suffix == ".npy":
+        audio, duration = load_npy(path)
+    elif suffix in COMPRESSED_SUFFIXES:
+        audio, duration = load_compressed(path)
+    else:
+        raise ValueError(
+            f"Unsupported input '{suffix}'. Use WAV, NPY, or any "
+            "ffmpeg-supported format (M4A, MP3, AAC, OGG, FLAC, ...)."
+        )
+    audio = auto_boost(audio)
+    return audio, duration
 
 
 def waveform_preview(audio: np.ndarray | None, max_points: int = 900) -> list[float]:
@@ -1450,7 +1532,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
             form = self.parse_form()
             file_item = form["file"] if "file" in form else None
             if file_item is None or not file_item.filename:
-                raise ValueError("Choose a WAV or NPY file first")
+                raise ValueError("Choose an audio file first (WAV, M4A, MP3, AAC, OGG, FLAC, or NPY)")
 
             port = form.getfirst("port", self.server.default_serial_port).strip()
             baud = int(form.getfirst("baud", str(self.server.default_baud)))
