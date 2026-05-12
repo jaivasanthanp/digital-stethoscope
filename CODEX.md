@@ -1,6 +1,157 @@
 # Digital Stethoscope (v2 / CirCor 2022) — Session Handoff
 
-Last updated: 2026-05-12 (Claude session, M4A + live mic + ResNet-18 + BLE end-to-end)
+Last updated: 2026-05-12 (Claude session, phone -> BLE -> STM32 audio streaming verified)
+
+## End-of-day (2026-05-12, third handoff) — BLE audio streaming end-to-end
+
+The wireless audio path is now fully verified on hardware:
+
+```
+Phone / bleak client  --BLE WRITE_WITHOUT_RESPONSE-->  nRF52840 DK
+nRF52840 DK           --UART 'B' + 16 KB PCM ------>  STM32U575
+STM32U575             --on-chip DSP + INT8 ResNet -->  classification
+STM32U575             --UART 6-byte response ------>  nRF52840 DK
+nRF52840 DK           --BLE notify "Absent NN%" --->  Phone / bleak client
+```
+
+The user's `Myownheartbeat.m4a` was streamed through this path and the
+four BLE notifications matched the dashboard upload's verdict exactly:
+`Absent 82%`, `Absent 88%`, `Absent 75%`, `Absent 88%`.
+
+### Wiring (final, 3 wires)
+
+| STM32 NUCLEO-U575ZI-Q | nRF52840 DK | Direction |
+|---|---|---|
+| PD5 (USART2 TX, D53) | P0.08 (UART1 RX) | STM32 -> nRF, classifications |
+| PD6 (USART2 RX, D52) | P1.02 (UART1 TX) | nRF -> STM32, BLE-streamed audio |
+| GND | GND | common ground (required) |
+
+### Why nRF UART1 TX must be on P1.02
+
+The nRF52840 DK ties P0.05/P0.06/P0.07/P0.08 to the onboard J-Link OB's
+UART (RXD/TXD/CTS/RTS) via factory-intact solder bridges SB5..SB8. The
+JLink MCU actively drives those lines, so using any of them as nRF
+outputs results in contention that silently swallows bytes. P0.08 happens
+to work as an INPUT because J-Link is high-Z on its RXD-line, but using
+P0.06 or P0.07 as an OUTPUT does not. P1.02 is the Zephyr board-file
+default for `uart1` TX precisely because the P1.xx header is J-Link-free.
+
+### Firmware additions
+
+```
+app/src/ml/audio_bridge.c, .h            NEW — STM32 USART2 RX listener
+                                         that runs the 'B' + 16 KB
+                                         protocol, runs DSP + inference
+                                         under existing mutexes, replies
+                                         via ble_client_send()
+app/src/main.c                           + audio_bridge_init() after
+                                         validate_thread create
+app/CMakeLists.txt                       + src/ml/audio_bridge.c
+ble_peripheral/src/audio_input_service.c, .h
+                                         NEW — adds AudioIn GATT char
+                                         at UUID ...ABE on the existing
+                                         HSC service. 16 KB accumulator,
+                                         double-buffered handoff to a
+                                         k_work that drains over UART
+ble_peripheral/src/main.c                + audio_input_service_init(uart_dev)
+ble_peripheral/CMakeLists.txt            + src/audio_input_service.c
+ble_peripheral/boards/nrf52840dk_nrf52840.overlay
+                                         uart1_default and uart1_sleep
+                                         now include NRF_PSEL(UART_TX, 1, 2)
+                                         alongside NRF_PSEL(UART_RX, 0, 8)
+ble_peripheral/prj.conf                  CONFIG_BT_L2CAP_TX_MTU=247,
+                                         CONFIG_BT_BUF_ACL_TX_SIZE=251,
+                                         CONFIG_BT_BUF_ACL_RX_SIZE=251,
+                                         CONFIG_BT_CTLR_DATA_LENGTH_MAX=251,
+                                         CONFIG_BT_CTLR_PHY_2M=y
+                                         (Data Length Extension + 2M PHY
+                                         so the phone can write big
+                                         chunks fast)
+ml/06_validate_ble_audio.py              NEW — bleak-based Python BLE
+                                         audio sender. Decodes any
+                                         ffmpeg-supported file, scans
+                                         for "HeartSound", negotiates
+                                         MTU, streams in MTU-sized
+                                         WRITE_WITHOUT_RESPONSE chunks,
+                                         prints inbound notifications
+```
+
+### STM32 footprint after this segment
+
+FLASH 1.22 MB / 2 MB (58.2 %, unchanged from the ResNet-18 deploy).
+RAM   658 KB / 768 KB (83.7 %, +71 KB for the bridge thread).
+
+### nRF footprint
+
+FLASH 125.9 KB / 1 MB (12.0 %, +3 KB).
+RAM   62 KB / 256 KB (24 %, +40 KB for the two 16 KB accumulators).
+
+### Round-trip timing measured today
+
+- BLE write (phone -> nRF): ~3 s per window (bleak test uses 200-byte
+  chunks; Flutter / Web Bluetooth could halve this with full MTU 244
+  chunks)
+- UART forward (nRF -> STM32): 1395 ms per window at 115200 baud
+  (matches the theoretical 16001 * 10 / 115200)
+- STM32 DSP + ResNet-18 inference: ~600 ms / window
+- STM32 -> nRF response (6 bytes): ~0.5 ms
+- nRF BLE notify -> phone: ~30 ms
+
+Total ~5 s round trip per 2-second window with this test client.
+
+### Diagnostic technique (kept here for the next time we debug a silent
+firmware path)
+
+`CONFIG_LOG` is off on the STM32 to keep the dashboard UART
+binary-clean. To debug the audio bridge we temporarily emitted
+0xE0-prefixed sentinel bursts on USART1:
+
+```
+0xE0 0xB1                — bridge thread reached "waiting for 'B'"
+0xE0 0xB2 <byte>         — first non-'B' byte seen on USART2 RX
+0xE0 0xB3                — 'B' sync byte received
+0xE0 0xB4 <count_le_16>  — window finished arriving (count == 8000)
+0xE0 0xB5 <class> <conf> — inference finished
+0xE0 0xBE                — periodic heartbeat (every 4 s while idle)
+```
+
+This unblocked the P0.07-vs-P1.02 pin diagnosis (only `E0 BE`
+heartbeats kept arriving — bridge alive, no bytes flowing in). The
+markers were removed before the final commit because they would
+interfere with the dashboard's 0xA5 / 0xA6 parser if both data paths
+ran simultaneously. They live in commit history right before the
+final audio_bridge cleanup.
+
+## What is NOT done
+
+1. **Flutter Android app for the audio streaming path.** Firmware is
+   verified working with the Python bleak validator; the remaining
+   piece is a phone app that:
+   - Captures from the device microphone via `record` or `flutter_sound`
+   - Downsamples to 4 kHz mono int16 PCM
+   - Connects to `HeartSound` and discovers service
+     `12345678-1234-1234-1234-123456789ABC`
+   - Subscribes to characteristic `...ABD` for classification
+     notifications
+   - Writes PCM windows to characteristic `...ABE` in MTU-sized chunks
+     via WRITE_WITHOUT_RESPONSE
+   - Reference Dart-equivalent of `ml/06_validate_ble_audio.py`
+
+2. **Temporal GRU head (task 4).** Multi-day rewrite of dataloader +
+   model + STM32 inference loop.
+
+3. **Severity (Levine grade) head (task 5).** Half-day; data confirmed
+   present in `training_data.csv`.
+
+4. **ResNet-18 accuracy recovery.** Dropout, mixup, stronger
+   SpecAugment.
+
+---
+
+## Earlier today (third-to-last handoff) — M4A, live mic, ResNet-18 deploy
+
+(Original entry; trimmed to keep this file readable. See CLAUDE.md
+"Session Log — 2026-05-12 (continued)" for full detail.)
 
 ## Project state at end of session (2026-05-12, second handoff)
 

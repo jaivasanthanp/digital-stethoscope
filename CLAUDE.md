@@ -1413,10 +1413,6 @@ ml/models/resnet18_train_log.txt
 
 ### What is NOT done (next session work)
 
-These were on the upgrade list authorized by the user but are real
-multi-day tasks. Half-finished scaffolds were deliberately NOT
-committed:
-
 1. **Temporal GRU head (task 4).** Architecture: small GRU (units=32)
    consuming GAP-layer embeddings of 4-5 consecutive 2-second windows,
    final Dense(3) softmax. Requires: rewrite the dataloader to group
@@ -1432,18 +1428,13 @@ committed:
    multi-output INT8 PTQ, second-output read on STM32, dashboard
    column.
 
-3. **Phone → BLE → STM32 audio streaming (task 6).** Two pieces:
-   (a) physical wiring change — add nRF UART1 TX on a chosen pin (e.g.
-   P0.06) and a jumper from there to STM32 USART2 RX (PD6), so the nRF
-   can talk back to the STM32 over the same UART that the STM32 already
-   uses to talk to the nRF; (b) firmware changes — new WRITE-without-
-   response GATT characteristic on the nRF that buffers a 2-second
-   16 KB int16 PCM window from the phone, forwards it to the STM32
-   using the existing `'A'`-command protocol over the new TX wire,
-   reads the extended response back over the existing TX wire from
-   STM32, decodes class + confidence, BLE-notifies the result back to
-   the phone. The phone-side sender needs to be either a small bleak
-   Python client or a Flutter / SwiftUI app.
+3. **Flutter Android app for the BLE audio streaming path.** Firmware
+   side is done and verified (see Session Log — 2026-05-12 BLE audio
+   streaming below). Remaining work is a Flutter or SwiftUI / Web
+   Bluetooth client that captures from the phone microphone, downsamples
+   to 4 kHz int16 PCM and writes to the audio-in characteristic
+   `12345678-1234-1234-1234-123456789ABE`. Reference implementation:
+   `ml/06_validate_ble_audio.py` — same GATT writes, just in Dart.
 
 4. **ResNet-18 accuracy recovery.** The test-set regression is the
    most interesting next experiment:
@@ -1455,3 +1446,179 @@ committed:
    - If none of those close the gap, revert `model_data.cc` to
      `resnet10_int8.tflite` for the demo and keep the bigger-model
      work as a documented experiment branch.
+
+---
+
+## Session Log — 2026-05-12 (final: phone -> BLE -> STM32 audio streaming)
+
+End-to-end wireless audio path verified on hardware. The user's
+`Myownheartbeat.m4a` (the same phone recording that classified as 5/5
+Absent through the dashboard upload path) was streamed over BLE from a
+Python bleak client to the nRF52840 DK, forwarded to the STM32U575 over
+UART, classified by the on-chip ResNet-18, and returned to the bleak
+client as four BLE notifications: `"Absent 82%"`, `"Absent 88%"`,
+`"Absent 75%"`, `"Absent 88%"`. All consistent with the dashboard
+upload's verdict.
+
+### Architecture (one box per data direction)
+
+```
+Phone or bleak Python client
+   │
+   │  BLE WRITE_WITHOUT_RESPONSE chunks  (MTU 247 -> 244 B/chunk, 66 writes / window)
+   │  -> characteristic 12345678-...-789ABE  (audio_in, 16 KB / window)
+   ▼
+nRF52840 DK  (Zephyr, ble_peripheral/)
+   │  audio_input_service.c:
+   │    - accumulates int16 LE PCM into s_window[16000]
+   │    - on full window, swaps into s_window_ready[] and submits k_work
+   │  forward_work_handler():
+   │    - writes 'B' (0x42) + 16000 bytes on UART1 TX (P1.02)
+   │
+   │  UART1 TX = P1.02   (115200 baud, ~1.4 s for the full 16001-byte burst)
+   ▼
+STM32U575  (Zephyr, app/)
+   │  audio_bridge.c (NEW):
+   │    - ISR on USART2 RX (PD6) fills an 18 KB ring buffer
+   │    - audio_bridge_thread waits for 'B' sync byte
+   │    - reads 16000 bytes, converts int16 LE -> float32 / 32768
+   │    - mel_spec_compute (mutex)  -> 64x64 log-mel spectrogram
+   │    - inference_run_probs (mutex) -> ResNet-18 INT8 -> class + conf + raw probs
+   │    - ble_client_send() writes 6-byte [class, conf, 0x00, ts_u24_le] over USART2 TX (PD5)
+   │
+   │  6-byte packet, identical format to existing dashboard-upload + synth paths
+   ▼
+nRF52840 DK  (existing uart_rx_cb in main.c)
+   │  parses 6-byte packet exactly as before
+   │  hsc_service_notify(conn, class_id, confidence, ts_ms)
+   │    -> formats "Absent NN%" / "Present NN%" / "Unknown NN%" string
+   │    -> bt_gatt_notify() on characteristic ...ABD (HSC_Result)
+   ▼
+Phone or bleak Python client
+   readable ASCII notification arrives in the BLE log
+```
+
+### Pin re-mapping saga (kept for future debugging)
+
+The first two pin choices for `UART1 TX` on the nRF52840 DK failed
+silently. Both lie in the strip of GPIOs Nordic ties to the onboard
+J-Link OB's UART via factory solder bridges:
+
+| Pin | J-Link function | Outcome |
+|---|---|---|
+| `P0.06` | UART0 TXD | nRF console output stayed alive (UART0 won the pinmux), our UART1 TX bytes went nowhere |
+| `P0.07` | UART CTS | nRF's own logs said "forwarded window #N in 1395 ms" — uart_poll_out wrote the bytes — but J-Link OB was driving the line and the STM32 never saw them |
+| **`P1.02`** | **none (free GPIO)** | **works cleanly** |
+
+The DK's J-Link OB controls P0.05 (RXD) / P0.06 (TXD) / P0.07 (CTS) /
+P0.08 (RTS) via SB5..SB8. P0.08 happened to work for our **RX** because
+J-Link is high-Z on that pin, but using P0.06 or P0.07 as nRF **outputs**
+puts us in contention with the J-Link MCU and the bytes are eaten.
+P1.02 is the Zephyr board-file default for `uart1` TX precisely because
+the P1.xx header is J-Link-free.
+
+### Diagnostic technique that broke it open
+
+`CONFIG_LOG` is disabled on the STM32 build (dashboard binary-clean
+console), so the audio_bridge had no visible output. To debug we
+temporarily added single-byte sentinel bursts on USART1 (the dashboard
+UART), keyed off the 0xE0 prefix to be easy to spot among the existing
+0xA5 / 0xA6 protocol bytes:
+
+```
+0xE0 0xB1                ─ bridge thread reached "waiting for 'B'"
+0xE0 0xB2 <byte>         ─ first non-'B' byte ever seen on USART2 RX
+0xE0 0xB3                ─ 'B' sync byte received
+0xE0 0xB4 <count_le_16>  ─ window finished arriving (count == 8000 samples)
+0xE0 0xB5 <class> <conf> ─ inference finished
+0xE0 0xBE                ─ periodic heartbeat (every 4 s while idle)
+```
+
+With those in place we could read raw bytes off COM6 in PowerShell and
+see exactly which stage stalled. The P0.07 J-Link contention manifested
+as the heartbeat byte `E0 BE` repeating indefinitely with no `E0 B3`
+following any BLE upload. After moving the wire to P1.02 we immediately
+saw the expected `E0 B3 E0 B4 40 1F E0 B5 00 52` sequence (class 0,
+0x52 = 82 %) and matching `"Absent 82%"` BLE notifications.
+
+The diagnostic markers were removed before the final commit because
+they would interfere with the dashboard's `0xA5` / `0xA6` parser if
+both data paths ran simultaneously. They live in the git history at
+the commit immediately before the final audio_bridge cleanup.
+
+### Files added / modified this segment
+
+```
+app/CMakeLists.txt                    + src/ml/audio_bridge.c
+app/src/main.c                        + #include "ml/audio_bridge.h"
+                                      + audio_bridge_init() after validate
+app/src/ml/audio_bridge.h             NEW
+app/src/ml/audio_bridge.c             NEW (~115 lines, 18 KB RX rb,
+                                      32 KB float audio, 16 KB spec
+                                      buffer, 4 KB stack)
+ble_peripheral/CMakeLists.txt         + src/audio_input_service.c
+ble_peripheral/src/main.c             + #include "audio_input_service.h"
+                                      + audio_input_service_init(uart_dev)
+ble_peripheral/src/audio_input_service.h   NEW
+ble_peripheral/src/audio_input_service.c   NEW (BT_GATT_SERVICE_DEFINE
+                                            for the AudioIn char + 16 KB
+                                            accumulator + forward_work
+                                            handler)
+ble_peripheral/boards/nrf52840dk_nrf52840.overlay
+                                      uart1_default + uart1_sleep now
+                                      include NRF_PSEL(UART_TX, 1, 2)
+                                      alongside the existing
+                                      NRF_PSEL(UART_RX, 0, 8)
+ble_peripheral/prj.conf               CONFIG_BT_L2CAP_TX_MTU=247
+                                      CONFIG_BT_BUF_ACL_TX_SIZE=251
+                                      CONFIG_BT_BUF_ACL_RX_SIZE=251
+                                      CONFIG_BT_CTLR_DATA_LENGTH_MAX=251
+                                      CONFIG_BT_CTLR_PHY_2M=y
+ml/06_validate_ble_audio.py           NEW — bleak Python client
+```
+
+### Build numbers after this segment
+
+- STM32 firmware: FLASH 1.22 MB / 2 MB (58.2 %, unchanged), RAM
+  587 KB → 658 KB / 768 KB (75 % → 84 %). +71 KB for the new audio
+  bridge (18 KB ring buffer + 32 KB float audio + 16 KB spec + 4 KB
+  thread stack).
+- nRF firmware: FLASH 125.9 KB / 1 MB (12 %), RAM 62 KB / 256 KB (24 %).
+  ~3 KB FLASH and ~40 KB RAM added vs the BLE-only build (two 16 KB
+  accumulator buffers + service descriptors).
+
+### Measured timing on hardware
+
+- BLE write phase (phone → nRF): ~3 s per window in the bleak test
+  (80 × 200-byte chunks; could be tightened to ~500 ms with 244-byte
+  chunks).
+- nRF → STM32 UART forward: 1395 ms per window at 115200 baud (matches
+  the theoretical 16001 × 10 / 115200 = 1.389 s).
+- STM32 DSP + ResNet-18 inference: ~600 ms per window.
+- STM32 → nRF response (6 bytes): ~0.5 ms.
+- nRF → phone BLE notify: ~30 ms.
+
+**Total round trip per window: ~5 s** with the current test client.
+Dominated by the BLE write phase (which the bleak test pessimises with
+small chunks). The Flutter app can use larger writes and the BLE 2 M
+PHY to bring this under 1 s round trip.
+
+### Things to remember for the next session
+
+- The UART1 TX pin on the nRF52840 DK is `P1.02`, NOT P0.06 / P0.07
+  (those are J-Link reserved). The user guide and Zephyr board file
+  agree on this — anything in P0.05–P0.08 should be assumed off-limits
+  for nRF outputs on this DK.
+- The audio bridge logs `LOG_INF` lines on USART1 but `CONFIG_LOG` is
+  disabled on this STM32 build, so they're effectively no-ops. If you
+  need to debug the bridge again, re-introduce the 0xE0-prefixed
+  sentinel bursts (full set documented above) or enable CONFIG_LOG on
+  a separate UART.
+- A 6-byte response from `ble_client_send()` is sent over USART2 TX
+  for BOTH the dashboard-upload path and the BLE-audio path. The nRF's
+  6-byte parser does not disambiguate the source — it just notifies
+  the most recent classification. If both paths fire windows
+  simultaneously, the order of notifications may interleave.
+- `ml/06_validate_ble_audio.py` requires `pip install bleak
+  imageio-ffmpeg soundfile`. It works on Windows 10/11 via the native
+  WinRT BLE stack.

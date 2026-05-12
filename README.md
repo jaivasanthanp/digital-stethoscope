@@ -4,7 +4,7 @@
 > No cloud. No proprietary IDEs. Pure embedded ML, ~507 ms / window with a
 > 720 K-parameter ResNet-18-tiny on chip.
 
-A wearable digital stethoscope prototype. Three audio sources, all converging
+A wearable digital stethoscope prototype. Four audio sources, all converging
 on the same on-chip DSP + INT8 CNN inference path on the STM32U575:
 
 1. **File upload** — drop in a `WAV`, `M4A`, `MP3`, `AAC`, `OGG`, `FLAC`,
@@ -13,7 +13,12 @@ on the same on-chip DSP + INT8 CNN inference path on the STM32U575:
 2. **Live laptop microphone** — browser Web Audio API captures from the
    default mic, downsamples to 4 kHz, ships each 2-second window to the
    STM32 in real time.
-3. **Synthetic PCG self-test** — on-chip 4 kHz audio rendered from a tiny
+3. **Wireless BLE audio streaming** — any BLE central (`bleak` Python
+   script or a phone app) writes int16 PCM windows to the nRF52840 DK's
+   AudioIn characteristic. The nRF buffers, forwards to STM32 over UART,
+   and the classification is BLE-notified back. Verified end-to-end with
+   `ml/06_validate_ble_audio.py`.
+4. **Synthetic PCG self-test** — on-chip 4 kHz audio rendered from a tiny
    script, kept around for hardware-without-host demos (`'S'` / `'P'`
    commands on UART).
 
@@ -444,16 +449,21 @@ frame `[class_id, confidence, reserved, timestamp_ms u24 LE]`; the ASCII
 conversion happens inside `hsc_service_notify()` on the nRF, right before
 the BLE notify.
 
-### Wiring
+### Wiring (3 wires total)
 
 | Wire | STM32 NUCLEO-U575ZI-Q | nRF52840 DK |
 |---|---|---|
-| Data | **PD5** — USART2 TX (silkscreen `USART_B_TX` / D53) | **P0.08** — UART1 RX |
+| Classification out | **PD5** — USART2 TX (silkscreen `USART_B_TX` / D53) | **P0.08** — UART1 RX |
+| Audio in (BLE path) | **PD6** — USART2 RX (silkscreen `USART_B_RX` / D52) | **P1.02** — UART1 TX |
 | Ground | any **GND** | any **GND** |
 
-USART3 was originally specced but has no labelled header pin on the
-NUCLEO-U575ZI-Q, so the bridge moved to USART2 on 2026-05-12. A common GND
-wire is required even when both boards share a PC.
+Notes:
+- USART3 was originally specced but has no labelled header pin on the
+  NUCLEO-U575ZI-Q, so the bridge moved to USART2.
+- nRF UART1 TX is on `P1.02`, NOT `P0.06` / `P0.07` — those pins are
+  factory-tied to the onboard J-Link interface UART via solder bridges
+  and the J-Link wins the contention, silently killing our bytes.
+- A common GND wire is required even when both boards share a PC.
 
 ### Demo
 
@@ -483,10 +493,12 @@ window emits one notification on the phone, ~3 s apart.
 | 6b | **Dashboard Live Mic mode (Web Audio API)** | **Done (2026-05-12)** |
 | 6c | **Bigger CNN deployment — ResNet-18, 720 K params, 756 KB INT8 on STM32** | **Done (2026-05-12)** |
 | 6d | Levine grade / severity head — dataset investigation | Done; implementation deferred |
-| 7a | Temporal GRU head over consecutive windows | Deferred — multi-day rewrite |
-| 7b | Phone → BLE → STM32 audio streaming | Deferred — needs extra wire + firmware |
-| 7c | ResNet-18 accuracy recovery (dropout / mixup / stronger SpecAugment) | Deferred — single experiment |
-| 8 | Polish, demo video | In progress |
+| 7  | **Phone → BLE → STM32 audio streaming (firmware + Python validator)** | **Done (2026-05-12)** |
+| 7a | Flutter Android app for the audio streaming path | Pending — firmware ready, app is the remaining work |
+| 8a | Temporal GRU head over consecutive windows | Deferred — multi-day rewrite |
+| 8b | ResNet-18 accuracy recovery (dropout / mixup / stronger SpecAugment) | Deferred — single experiment |
+| 8c | Levine grade severity head implementation | Deferred — half-day of focused work |
+| 9 | Polish, demo video | In progress |
 
 ### Next-session work (priorities in order)
 
